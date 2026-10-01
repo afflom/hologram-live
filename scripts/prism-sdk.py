@@ -68,7 +68,7 @@ def docker_command(image, name, scratch_gib, command):
 
 
 def checked_output(*args, cwd=None):
-    return subprocess.check_output(args, cwd=cwd, text=True).strip()
+    return subprocess.check_output(args, cwd=cwd, text=True, timeout=30).strip()
 
 
 def bounded_timeout(value):
@@ -109,13 +109,17 @@ def execute(root, image, scratch_gib, timeout, command):
         return status
     finally:
         # Only this invocation's random container is eligible for removal.
-        subprocess.run(["docker", "container", "rm", "--force", name],
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                       timeout=20, check=False)
-        for process in (container, archive):
-            if process is not None and process.poll() is None:
-                process.kill()
-                process.wait(timeout=10)
+        try:
+            cleanup = subprocess.run(["docker", "container", "rm", "--force", name],
+                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                     timeout=20, check=False)
+            if cleanup.returncode and container is not None and container.poll() is None:
+                raise ValueError(f"cannot confirm cleanup of {name}; inspect before another run")
+        finally:
+            for process in (container, archive):
+                if process is not None and process.poll() is None:
+                    process.kill()
+                    process.wait(timeout=10)
 
 
 def main():
