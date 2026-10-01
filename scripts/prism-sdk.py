@@ -6,13 +6,16 @@ It never pulls images, mounts host caches/sockets, or prunes other work.
 """
 
 import argparse
+from contextlib import contextmanager
 import json
+import os
 from pathlib import Path
 import re
 import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import uuid
 
 
@@ -20,8 +23,10 @@ GIB = 1024**3
 IMAGE = re.compile(r"[a-z0-9][a-z0-9./:_-]*@sha256:[0-9a-f]{64}\Z")
 
 
-def locked_image(root):
-    lock = json.loads((root / "prismpm.lock").read_text())
+def locked_image(root, revision=None):
+    content = ((root / "prismpm.lock").read_text() if revision is None else
+               checked_output("git", "show", revision + ":prismpm.lock", cwd=root))
+    lock = json.loads(content)
     image = lock.get("sdk_image", "")
     if lock.get("schema") != "prismpm/sdk-lock/1" or not IMAGE.fullmatch(image):
         raise ValueError("expected an immutable SDK image in prismpm/sdk-lock/1")
@@ -68,7 +73,57 @@ def docker_command(image, name, scratch_gib, command):
 
 
 def checked_output(*args, cwd=None):
-    return subprocess.check_output(args, cwd=cwd, text=True, timeout=30).strip()
+    if args[0] == "git":
+        args = ("git", "--no-replace-objects", *args[1:])
+    return subprocess.check_output(args, cwd=cwd, env=clean_environment(),
+                                   text=True, timeout=30).strip()
+
+
+def clean_environment():
+    # Local Git attributes, replacement refs and injected config are not source.
+    env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    env.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_SYSTEM=os.devnull,
+               GIT_ATTR_NOSYSTEM="1", GIT_NO_REPLACE_OBJECTS="1")
+    return env
+
+
+@contextmanager
+def source_archive(root, revision):
+    objects = checked_output("git", "rev-parse", "--path-format=absolute", "--git-path", "objects", cwd=root)
+    with tempfile.TemporaryDirectory(prefix="hologram-source-") as directory:
+        git_dir = Path(directory)
+        subprocess.run(["git", "-c", "init.templateDir=", "init", "--bare", "--quiet", directory],
+                       env=clean_environment(), check=True, timeout=30)
+        # Override both committed and untracked export directives. Export every
+        # committed blob unchanged, including literal export-subst placeholders.
+        (git_dir / "info").mkdir(exist_ok=True)
+        (git_dir / "info" / "attributes").write_text("* -export-ignore -export-subst\n")
+        env = clean_environment()
+        env["GIT_OBJECT_DIRECTORY"] = objects
+        process = subprocess.Popen(
+            ["git", "--no-replace-objects", "--git-dir=" + directory,
+             "-c", "core.attributesFile=" + os.devnull, "archive", "--format=tar", revision],
+            env=env, stdout=subprocess.PIPE)
+        try:
+            yield process
+        finally:
+            if process.stdout:
+                process.stdout.close()
+            if process.poll() is None:
+                process.kill()
+                process.wait(timeout=10)
+
+
+def cleanup_container(name):
+    subprocess.run(["docker", "container", "rm", "--force", name],
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                   timeout=20, check=False)
+    # A stopped Docker CLI does not establish daemon-side cleanup. A successful
+    # exact-name listing must positively establish absence, even after --rm.
+    remaining = checked_output("docker", "container", "ls", "--all", "--quiet",
+                               "--filter", "name=^/" + name + "$")
+    if remaining:
+        raise ValueError(f"cleanup failed for {name}; inspect before another run")
 
 
 def bounded_timeout(value):
@@ -78,10 +133,11 @@ def bounded_timeout(value):
     return value
 
 
-def execute(root, image, scratch_gib, timeout, command):
+def execute(root, scratch_gib, timeout, command):
     if checked_output("git", "status", "--porcelain", "--untracked-files=all", cwd=root):
         raise ValueError("commit the issue worktree before verification; dirty inputs refused")
     revision = checked_output("git", "rev-parse", "HEAD", cwd=root)
+    image = locked_image(root, revision)
     inspected = json.loads(checked_output("docker", "image", "inspect", image))
     if len(inspected) != 1 or image not in (inspected[0].get("RepoDigests") or []):
         raise ValueError("the exact locked image is not installed; no automatic pull")
@@ -93,13 +149,12 @@ def execute(root, image, scratch_gib, timeout, command):
                       "command": command, "acceptance": "not-established"}),
           file=sys.stderr, flush=True)
     try:
-        archive = subprocess.Popen(["git", "archive", "--format=tar", revision],
-                                   cwd=root, stdout=subprocess.PIPE)
-        container = subprocess.Popen(docker_command(image, name, scratch_gib, command),
-                                     stdin=archive.stdout)
-        archive.stdout.close()
-        status = container.wait(timeout=timeout)
-        archive_status = archive.wait(timeout=10)
+        with source_archive(root, revision) as archive:
+            container = subprocess.Popen(docker_command(image, name, scratch_gib, command),
+                                         stdin=archive.stdout)
+            archive.stdout.close()
+            status = container.wait(timeout=timeout)
+            archive_status = archive.wait(timeout=10)
         if status == 0 and archive_status != 0:
             raise ValueError("source archive failed; the command result is not valid")
         if checked_output("git", "rev-parse", "HEAD", cwd=root) != revision:
@@ -110,11 +165,7 @@ def execute(root, image, scratch_gib, timeout, command):
     finally:
         # Only this invocation's random container is eligible for removal.
         try:
-            cleanup = subprocess.run(["docker", "container", "rm", "--force", name],
-                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                                     timeout=20, check=False)
-            if cleanup.returncode and container is not None and container.poll() is None:
-                raise ValueError(f"cannot confirm cleanup of {name}; inspect before another run")
+            cleanup_container(name)
         finally:
             for process in (container, archive):
                 if process is not None and process.poll() is None:
@@ -138,7 +189,7 @@ def main():
 
     signal.signal(signal.SIGTERM, interrupted)
     try:
-        return execute(root, locked_image(root), args.scratch_gib, args.timeout, command)
+        return execute(root, args.scratch_gib, args.timeout, command)
     except subprocess.TimeoutExpired:
         print("error: bounded SDK run timed out; no acceptance established", file=sys.stderr)
         return 124

@@ -1,8 +1,11 @@
 """Infrastructure regression tests, not PrismPM/product acceptance oracles."""
 
 import importlib.util
+import io
 import json
 from pathlib import Path
+import subprocess
+import tarfile
 import tempfile
 import unittest
 
@@ -79,6 +82,50 @@ class BudgetTests(unittest.TestCase):
     def test_low_memory(self):
         with self.assertRaisesRegex(ValueError, "RAM"):
             SDK.require_capacity(20 * SDK.GIB, 5 * SDK.GIB - 1, 2)
+
+
+class CommittedSourceTests(unittest.TestCase):
+    def repository(self, root):
+        subprocess.run(["git", "init", "--quiet", str(root)], check=True)
+        (root / "prismpm.lock").write_text(json.dumps(LockTests().lock()))
+        (root / "payload").write_text("original $Format:%H$\n")
+        (root / ".gitattributes").write_text("payload export-ignore export-subst\n")
+        subprocess.run(["git", "add", "."], cwd=root, check=True)
+        subprocess.run(["git", "-c", "user.name=Regression", "-c", "user.email=regression@example.invalid",
+                        "-c", "commit.gpgsign=false", "commit", "--quiet", "-m", "source"], cwd=root, check=True)
+        return SDK.checked_output("git", "rev-parse", "HEAD", cwd=root)
+
+    def test_hidden_worktree_lock_cannot_select_sdk(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            revision = self.repository(root)
+            subprocess.run(["git", "update-index", "--assume-unchanged", "prismpm.lock"], cwd=root, check=True)
+            (root / "prismpm.lock").write_text("{}")
+            self.assertEqual(SDK.checked_output("git", "status", "--porcelain", cwd=root), "")
+            self.assertEqual(SDK.locked_image(root, revision), IMAGE)
+
+    def test_export_attributes_and_replacements_cannot_change_blobs(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            revision = self.repository(root)
+            (root / ".git/info/attributes").write_text("payload export-ignore export-subst\n")
+            old = SDK.checked_output("git", "rev-parse", "HEAD:payload", cwd=root)
+            new = subprocess.check_output(["git", "hash-object", "-w", "--stdin"],
+                                          cwd=root, input=b"replacement\n").decode().strip()
+            subprocess.run(["git", "replace", old, new], cwd=root, check=True)
+            with SDK.source_archive(root, revision) as process:
+                content = process.stdout.read()
+                self.assertEqual(process.wait(timeout=10), 0)
+            with tarfile.open(fileobj=io.BytesIO(content)) as archive:
+                self.assertEqual(set(archive.getnames()), {"payload", "prismpm.lock", ".gitattributes"})
+                self.assertEqual(archive.extractfile("payload").read(), b"original $Format:%H$\n")
+
+    def test_unknown_daemon_state_is_not_successful_cleanup(self):
+        # The test SDK has no Docker socket/network. Inability to establish
+        # absence must fail rather than trusting that a local CLI exited.
+        self.assertFalse(Path("/var/run/docker.sock").exists())
+        with self.assertRaises(subprocess.CalledProcessError):
+            SDK.cleanup_container("hologram-prism-sdk-regression-absent")
 
 
 class CommandTests(unittest.TestCase):
