@@ -2,10 +2,17 @@ name: ci
 
 on:
   push:
+    branches: [main, prismpm-hologram-live]
+    tags: ['*']
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   rust:
