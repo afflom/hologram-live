@@ -83,6 +83,7 @@ def _worker(command, timeout):
     _subreaper(True)
     started = time.perf_counter()
     buffers = {"stdout": bytearray(), "stderr": bytearray()}
+    observed = {"stdout": 0, "stderr": 0}
     status = "completed"
     process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                start_new_session=True)
@@ -105,6 +106,7 @@ def _worker(command, timeout):
                         selector.unregister(key.fileobj)
                         continue
                     available = OUTPUT_LIMIT - sum(map(len, buffers.values()))
+                    observed[key.data] += len(data)
                     buffers[key.data].extend(data[:available])
                     if len(data) > available:
                         status = "output-limit"
@@ -125,11 +127,24 @@ def _worker(command, timeout):
         status = "cleanup-failed"
     elif killed and status == "completed":
         status = "descendants-survived"
+    output = {}
+    for key, data in buffers.items():
+        try:
+            output[key] = data.decode("utf-8")
+            output[key + "_utf8_valid"] = True
+        except UnicodeDecodeError:
+            output[key] = data.decode("utf-8", errors="replace")
+            output[key + "_utf8_valid"] = False
+        output[key + "_sha256"] = hashlib.sha256(data).hexdigest()
+        output[key + "_captured_bytes"] = len(data)
+        output[key + "_observed_bytes"] = observed[key]
+        output[key + "_truncated"] = observed[key] > len(data)
     return {"status": status, "command": command,
             "returncode": process.returncode, "elapsed_ms": (time.perf_counter() - started) * 1000,
             "cleanup_confirmed": clean, "output_limit_bytes": OUTPUT_LIMIT,
+            "output_complete": status == "completed",
             "peak_rss_mib": resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss / 1024,
-            **{key: data.decode("utf-8", errors="replace") for key, data in buffers.items()}}
+            **output}
 
 
 def _run_sample(command, timeout=30):
@@ -217,6 +232,8 @@ def measure(command, iterations=25, timeout=30):
 
 def run_json(command, timeout=30):
     sample = run_sample(command, timeout)
+    if not sample.get("stdout_utf8_valid"):
+        raise MeasurementError("command returned invalid UTF-8 JSON", sample)
     def reject_nonfinite(value):
         raise ValueError(f"non-finite JSON number: {value}")
     def finite_float(value):
@@ -258,10 +275,8 @@ def report_run(path, collect):
     journal = []
     def record(sample):
         entry = {key: value for key, value in sample.items() if key not in ("stdout", "stderr")}
-        # Bind captured output without publishing potentially sensitive CLI text.
-        for key in ("stdout", "stderr"):
-            if key in sample:
-                entry[key + "_sha256"] = hashlib.sha256(sample[key].encode()).hexdigest()
+        # Preserve the worker's original-byte digests, counts and completeness
+        # metadata without publishing potentially sensitive decoded CLI text.
         journal.append(entry)
         write_report(path, {**base, "status": "running", "invocations": journal})
     token = _RECORDER.set(record)

@@ -2,6 +2,7 @@
 
 import json
 import importlib.util
+import hashlib
 from pathlib import Path
 import sys
 import subprocess
@@ -198,6 +199,22 @@ class MeasurementTests(unittest.TestCase):
                        "print('{\"value\": 1e999}')", "print('{\"nested\": [{\"value\": -1e999}]}')"):
             with self.subTest(source=source), self.assertRaises(MeasurementError):
                 run_json(self.command(source))
+
+    def test_output_digest_binds_original_bytes_and_json_requires_utf8(self):
+        with tempfile.TemporaryDirectory() as directory:
+            report = Path(directory) / "report.json"
+            def collect():
+                for value in (254, 255):
+                    run_sample(self.command(f"import os; os.write(1,bytes([{value}]))"))
+            report_run(report, collect)
+            invocations = json.loads(report.read_text())["invocations"]
+            for sample, value in zip(invocations, (254, 255)):
+                self.assertEqual(sample["stdout_sha256"], hashlib.sha256(bytes([value])).hexdigest())
+                self.assertEqual(sample["stdout_captured_bytes"], 1)
+                self.assertFalse(sample["stdout_utf8_valid"])
+            self.assertNotEqual(invocations[0]["stdout_sha256"], invocations[1]["stdout_sha256"])
+        with self.assertRaisesRegex(MeasurementError, "invalid UTF-8"):
+            run_json(self.command("import os; os.write(1,b'{\"value\":\"\\xff\"}')"))
 
     def test_invalid_iterations_and_timeouts(self):
         for count in (0, -1, True, 1.5):
