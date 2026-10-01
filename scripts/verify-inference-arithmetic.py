@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Kernel-check the actual LexLean matrix model against exact boundary products.
+"""Kernel-check actual LexLean matrix costs and typed prefix bounds.
 
 This is a model regression, not generated-runtime or full H19 acceptance.
 Only test inputs and workspace metadata are generated here; Lean is generated
@@ -59,6 +59,27 @@ def theorem(index, dimensions):
     }
 
 
+def prefix_theorem(index, total, prefix):
+    valid = prefix <= total
+    error_type = {"kind": "named", "arguments": [],
+                  "member": {"module": "Hologram.Inference", "name": "KVPrefixError"}}
+    value = integer(total - prefix) if valid else {
+        "kind": "constructor",
+        "constructor": {"module": "Hologram.Inference", "name": "KVPrefixError.exceedsTotal"},
+        "arguments": [integer(total), integer(prefix)], "type_arguments": []}
+    return {
+        "kind": "theorem", "name": f"prefix_boundary_{index}",
+        "parameters": [], "axioms": ["Quot.sound", "propext"],
+        "proof": {"kind": "reflexivity"},
+        "statement": {"kind": "eq", "left": {
+            "kind": "call",
+            "function": {"module": "Hologram.Inference", "name": "kvEffectiveTokens"},
+            "arguments": [integer(total), integer(prefix)]},
+            "right": {"kind": "constructor",
+                      "constructor": {"name": "Result.ok" if valid else "Result.error"},
+                      "arguments": [value], "type_arguments": [{"kind": "uint64"}, error_type]}}}
+
+
 def run(program, args, workspace, *, check=True):
     executable = shutil.which(program)
     if executable is None:
@@ -72,15 +93,18 @@ def run(program, args, workspace, *, check=True):
     return result
 
 
-def is_false_equation_rejection(result):
-    """Bind negative evidence to the deliberately false zero-product equation."""
+def is_false_equation_rejection(result, *, prefix=False):
+    """Bind negative evidence to a deliberately false arithmetic equation."""
+    expression = ("Hologram.Inference.kvEffectiveTokens 0 1" if prefix else
+                  "Hologram.Inference.matmulFlops { m := 0, k := 0, n := 0 }")
+    wrong_value = "Except.ok 0" if prefix else "some 1"
     expected = (
         "Lean rejected `PrismHologram.Checks` (error): Tactic `rfl` failed: "
         "The left-hand side\n"
-        "  Hologram.Inference.matmulFlops { m := 0, k := 0, n := 0 }\n"
+        f"  {expression}\n"
         "is not definitionally equal to the right-hand side\n"
-        "  some 1\n\n"
-        "⊢ Hologram.Inference.matmulFlops { m := 0, k := 0, n := 0 } = some 1"
+        f"  {wrong_value}\n\n"
+        f"⊢ {expression} = {wrong_value}"
     )
     diagnostics = result.get("diagnostics", [])
     return (
@@ -115,8 +139,11 @@ def main():
     values = (0, 1, 2, (1 << 32) - 1, 1 << 32, 1 << 63, UINT64_MAX)
     cases = list(itertools.product(values, repeat=3))
     cases.extend(((1, 1, UINT64_MAX // 2), (1, 1, UINT64_MAX // 2 + 1), (1 << 63, 0, 10)))
+    prefix_cases = list(itertools.product(values, repeat=2))
     payload = json.dumps({"spec": "lexlean/semantic-module/1",
-                          "declarations": [theorem(index, dims) for index, dims in enumerate(cases)]},
+                          "declarations": [theorem(index, dims) for index, dims in enumerate(cases)]
+                          + [prefix_theorem(index, total, prefix)
+                             for index, (total, prefix) in enumerate(prefix_cases)]},
                          sort_keys=True, separators=(",", ":"))
     with tempfile.TemporaryDirectory(prefix="hologram-inference-arithmetic-") as owned:
         workspace = Path(owned)
@@ -192,16 +219,33 @@ child_timeout_ms = 300000
             unrelated["diagnostics"][0][key] = value
             if is_false_equation_rejection(unrelated):
                 raise RuntimeError("unrelated compiler evidence accepted")
+        false_prefix = json.loads(payload)
+        invalid_index = prefix_cases.index((0, 1))
+        wrong_result = false_prefix["declarations"][len(cases) + invalid_index]["statement"]["right"]
+        wrong_result["constructor"]["name"] = "Result.ok"
+        wrong_result["arguments"] = [integer(0)]
+        checks.write_text(header + json.dumps(false_prefix, sort_keys=True,
+                                             separators=(",", ":")) + footer, encoding="utf-8")
+        prefix_rejected = run("lexlean", arguments, workspace, check=False)
+        prefix_rejection = json.loads(prefix_rejected.stdout)
+        if prefix_rejected.returncode != 1 or not is_false_equation_rejection(prefix_rejection, prefix=True):
+            print(prefix_rejected.stdout, file=sys.stderr)
+            raise RuntimeError("compiler did not reject the false prefix-clamping equation")
         report = {"schema": "hologram/inference-arithmetic-regression/1",
                           "source_sha256": hashlib.sha256(source).hexdigest(),
                           "expected_cases": len(cases), "verified_cases": len(cases),
+                          "expected_prefix_cases": len(prefix_cases),
+                          "verified_prefix_cases": len(prefix_cases),
                           "false_equation_rejected": True,
+                          "false_prefix_clamping_rejected": True,
                           "verification": verification,
-                          "scope": "LexLean matrix boundary equations",
+                          "scope": "LexLean matrix and prefix boundary equations",
                           "product_acceptance": "not-established"}
         if options.evidence_directory is not None:
             (options.evidence_directory / "false-equation-result.json").write_text(
                 json.dumps(rejection, sort_keys=True) + "\n", encoding="utf-8")
+            (options.evidence_directory / "false-prefix-result.json").write_text(
+                json.dumps(prefix_rejection, sort_keys=True) + "\n", encoding="utf-8")
             (options.evidence_directory / "regression-result.json").write_text(
                 json.dumps(report, sort_keys=True) + "\n", encoding="utf-8")
         print(json.dumps(report, sort_keys=True))
