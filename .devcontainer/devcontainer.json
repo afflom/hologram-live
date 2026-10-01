@@ -1,0 +1,33 @@
+{
+  "name": "Hologram Live — locked PrismPM SDK",
+  "image": "ghcr.io/uor-foundation/prismpm-sdk-candidate@sha256:60226bc791d4c0e5613402a6be7e63f4963d3faf7f327befcf56fc0e41d0ce21",
+  "containerUser": "vscode",
+  "remoteUser": "vscode",
+  "overrideCommand": true,
+  "runArgs": [
+    "--cpus=2",
+    "--memory=4g",
+    "--memory-swap=4g",
+    "--pids-limit=512",
+    "--security-opt=no-new-privileges",
+    "--cap-drop=ALL",
+    "--tmpfs=/tmp:rw,exec,nosuid,nodev,size=2g,mode=1777"
+  ],
+  "containerEnv": {
+    "CARGO_BUILD_JOBS": "2",
+    "CARGO_INCREMENTAL": "0",
+    "CARGO_TARGET_DIR": "/tmp/hologram-target"
+  },
+  "postCreateCommand": ["/bin/sh", "-eu", "-c", "prismpm --version; lexlean --version"],
+  "customizations": {
+    "vscode": {
+      "settings": {
+        "files.watcherExclude": {
+          "**/.prism/**": true,
+          "**/.lexlean/**": true,
+          "**/target/**": true
+        }
+      }
+    }
+  }
+}
