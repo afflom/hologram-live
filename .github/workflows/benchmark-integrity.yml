@@ -1,0 +1,33 @@
+name: benchmark integrity
+
+on:
+  pull_request:
+  push:
+    branches: [main, prismpm-hologram-live]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: benchmark-integrity-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  measurement-regression:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Pull pinned SDK
+        run: docker pull ghcr.io/uor-foundation/prismpm-sdk-candidate@sha256:60226bc791d4c0e5613402a6be7e63f4963d3faf7f327befcf56fc0e41d0ce21
+      - name: Check measurement mechanics (not product acceptance)
+        run: >-
+          docker run --rm --pull=never --network none --read-only
+          --memory=512m --memory-swap=512m --cpus=2 --pids-limit=128
+          --tmpfs /tmp:rw,exec,nosuid,nodev,size=128m
+          --mount "type=bind,src=$GITHUB_WORKSPACE,dst=/workspace,readonly"
+          --workdir /workspace --env PYTHONDONTWRITEBYTECODE=1
+          --entrypoint python3
+          ghcr.io/uor-foundation/prismpm-sdk-candidate@sha256:60226bc791d4c0e5613402a6be7e63f4963d3faf7f327befcf56fc0e41d0ce21
+          scripts/test_benchmark_process.py

@@ -1,25 +1,16 @@
 #!/usr/bin/env python3
 """
-Performance comparison benchmark between PrismPM-governed and non-PrismPM hologram-live.
+CLI timing and cost-model diagnostics; not inference/deployment acceptance.
 
-Measures:
-1. Command Dispatch Latency & Throughput (standard vs --prism)
-2. Process Memory Footprint (Peak Resident Set Size)
-3. UOR / Prism Formal Inference Cost-Model Efficiency
-   - Matmul FLOP Bounds and Arithmetic Safety
-   - KV-Cache Token Elision Memory Savings
-   - Fused Kernel Operator Efficiency (FU-1..FU-4)
-4. Cluster Projection Reconciliation Overhead
+CLI timing includes process startup. Both flags invoke the same executable;
+their ratio does not establish generated-runtime superiority. Cost-model and
+projection sections still require the independent empirical evidence in H20.
 """
 
 import json
 import os
 
-try:
-    import resource
-except ImportError:  # Windows
-    resource = None
-import statistics
+from benchmark_process import measure
 import subprocess
 import sys
 import time
@@ -33,53 +24,11 @@ NUM_ITERATIONS = 25
 
 
 def measure_command(args: list[str], iterations: int = NUM_ITERATIONS) -> dict:
-    durations = []
-    max_rss_kb = []
-
-    for _ in range(iterations):
-        start = time.perf_counter()
-        proc = subprocess.run(
-            [str(BINARY_PATH)] + args,
-            capture_output=True,
-            text=True,
-        )
-        end = time.perf_counter()
-        if proc.returncode != 0:
-            print(f"Command failed: {args} -> {proc.stderr}", file=sys.stderr)
-            continue
-        durations.append((end - start) * 1000.0)  # ms
-
-        # Peak RSS of the children so far, without GNU time: /usr/bin/time -v
-        # exists on neither macOS nor a stock CI runner. ru_maxrss is KiB on
-        # Linux and bytes on macOS.
-        if resource is not None:
-            rss = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss
-            max_rss_kb.append(rss if sys.platform.startswith("linux") else rss / 1024.0)
-
-    if not durations:
-        return {"error": "All executions failed"}
-
-    durations.sort()
-    mean = statistics.mean(durations)
-    median = statistics.median(durations)
-    stdev = statistics.stdev(durations) if len(durations) > 1 else 0.0
-    p95_idx = int(0.95 * len(durations))
-    p95 = durations[p95_idx]
-    min_val = durations[0]
-    max_val = durations[-1]
-    avg_rss_mb = (statistics.mean(max_rss_kb) / 1024.0) if max_rss_kb else 0.0
-
-    return {
-        "iterations": len(durations),
-        "mean_ms": round(mean, 2),
-        "median_ms": round(median, 2),
-        "min_ms": round(min_val, 2),
-        "max_ms": round(max_val, 2),
-        "p95_ms": round(p95, 2),
-        "stdev_ms": round(stdev, 2),
-        "peak_rss_mb": round(avg_rss_mb, 2),
-        "throughput_ops_sec": round(1000.0 / mean, 2) if mean > 0 else 0,
-    }
+    result = measure([str(BINARY_PATH)] + args, iterations)
+    # Preserve the existing decimal-MB report field; canonical samples use MiB.
+    rss = result["peak_rss_mib"]
+    result["peak_rss_mb"] = rss * 1024**2 / 1_000_000 if rss is not None else None
+    return result
 
 
 def benchmark_uor_cost_model() -> dict:
@@ -232,7 +181,7 @@ def benchmark_working_set_containment() -> dict:
 
 
 def main():
-    print(f"=== Hologram Live Performance Benchmark: PrismPM vs Non-PrismPM ===")
+    print("=== Hologram Live CLI diagnostics (not inference performance acceptance) ===")
     print(f"Binary: {BINARY_PATH} ({BINARY_PATH.stat().st_size / 1_000_000:.1f} MB)")
     print(f"Iterations per test: {NUM_ITERATIONS}\n")
 
@@ -256,7 +205,7 @@ def main():
         }
         print(f"  Standard : {std_res['mean_ms']} ms (RSS: {std_res['peak_rss_mb']} MB)")
         print(f"  PrismPM  : {prism_res['mean_ms']} ms (RSS: {prism_res['peak_rss_mb']} MB)")
-        print(f"  Speedup  : {speedup}x\n")
+        print(f"  CLI elapsed-time ratio only: {speedup}x\n")
 
     print("Evaluating UOR Formal Inference Cost-Model...")
     uor_results = benchmark_uor_cost_model()
@@ -281,6 +230,8 @@ def main():
     }
 
     full_report = {
+        "acceptance": "not-established",
+        "measurement_scope": "CLI process timings only; cost-model formulas are not measured inference performance",
         "timestamp": time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime()),
         "binary": str(BINARY_PATH),
         "binary_size_bytes": BINARY_PATH.stat().st_size,

@@ -1,22 +1,13 @@
 #!/usr/bin/env python3
-"""
-Hologram-AI Operations and Capabilities Scaling Benchmark
-PrismPM Declarative Architecture vs Non-PrismPM Imperative Architecture
+"""Collect CLI cost-model estimates; not inference or optimization acceptance.
 
-Measures and contrasts:
-1. Working Set Containment (WS-1..WS-3) across Model Sizes (1B, 3B, 8B, 70B) and Context Windows (4k, 32k, 128k)
-2. Prefix KV-Cache Token Elision Memory Savings (0%, 50%, 80%)
-3. 4-Way Fused Operator DRAM Bandwidth Reductions (FU-1..FU-4)
-4. OS Swap Thrashing Failure Points under Imperative Execution
-5. Inductive Command Dispatch Latency & Throughput
+Only process spawn-to-exit latency is measured. Memory, traffic, dispatch and
+containment fields are unvalidated formula outputs, not empirical evidence.
 """
 
 import json
-import os
-import subprocess
-import sys
-import time
 from pathlib import Path
+from benchmark_process import run_json
 
 BINARY_PATH = Path("target/release/hologram")
 if not BINARY_PATH.exists():
@@ -35,20 +26,14 @@ def run_ai_compare(model: str, context_len: int, prefix_tokens: int, budget_gb: 
         "--memory-budget-gb", str(budget_gb),
         "--json",
     ]
-    t0 = time.perf_counter()
-    proc = subprocess.run(cmd, capture_output=True, text=True)
-    t1 = time.perf_counter()
-    if proc.returncode != 0:
-        print(f"Error running ai compare: {proc.stderr}", file=sys.stderr)
-        return {}
-    res = json.loads(proc.stdout)
-    res["execution_latency_ms"] = round((t1 - t0) * 1000.0, 3)
+    res, sample = run_json(cmd)
+    res["execution_latency_ms"] = sample["elapsed_ms"]
     return res
 
 
 def main():
     print("=" * 80)
-    print("  Hologram-AI Operations & Capabilities Benchmark: PrismPM vs Non-PrismPM")
+    print("  Hologram-AI cost-model estimates (not measured inference performance)")
     print(f"  Binary: {BINARY_PATH} ({BINARY_PATH.stat().st_size / 1_000_000:.1f} MB)")
     print("=" * 80)
     print()
@@ -93,8 +78,6 @@ def main():
     for model, ctx_len, prefix_ratio, budget_gb, label in scenarios:
         prefix_tokens = int(ctx_len * prefix_ratio)
         res = run_ai_compare(model, ctx_len, prefix_tokens, budget_gb)
-        if not res:
-            continue
 
         ws = res["working_set"]
         prism_gb = ws["total_prism_working_set_bytes"] / (1024**3)
@@ -107,6 +90,8 @@ def main():
 
         print(f"{label:<42} | {prism_gb:>8.2f} GB | {non_prism_gb:>10.2f} GB | {budget:>6} GB | {kv_savings:>8} | {status}")
         results.append({
+            "acceptance": "not-established",
+            "measurement_scope": "execution_latency_ms measures CLI spawn-to-exit only; other performance fields are unvalidated cost-model outputs",
             "scenario": label,
             "model": res["model"],
             "context_length": ctx_len,
