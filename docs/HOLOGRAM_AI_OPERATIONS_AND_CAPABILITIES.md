@@ -1,5 +1,11 @@
 # Hologram-AI Operations & Capabilities Architecture Report: PrismPM Declarative Modeling vs. Non-PrismPM Imperative Architecture
 
+> Historical, unaccepted architecture report. Its performance, memory, fusion,
+> containment and comparative claims are not production evidence. Canonical
+> equations do not establish general invariants or real inference behavior.
+> H19/H20 remain open; the handwritten runtime is not generated from the corrected
+> model. The arithmetic contract below describes only the current LexLean model.
+
 **Date:** 2026-09-30  
 **Repository:** `hologram-live` (Branch: `feat/prismpm-v0.3.0-sdk`)  
 **Specification Standard:** ISO/IEC/IEEE 42010 Systems & Software Architecture  
@@ -46,29 +52,21 @@ The PrismPM architecture anchors AI inference in mathematical proofs defined in 
 ### 2.1 Formal FLOP Bounds & Arithmetic Safety
 Matmul FLOP arithmetic is defined via checked arithmetic to prevent integer overflow vulnerabilities:
 $$\text{matmulFlops}(M, K, N) = 2 \times M \times K \times N$$
-In Lean 4:
-```lean
-def multiplyStep (acc : Option UInt64) (factor : UInt64) : Option UInt64 :=
-  match acc with
-  | none => none
-  | some val => checked_multiply val factor
-
-def matmulFlops (dim : MatrixDimension) : Option UInt64 :=
-  multiplyStep (multiplyStep (multiplyStep (some 2) dim.m) dim.k) dim.n
-```
-Theorems `matmulFlops_canonical` proves exact equivalence on canonical dimensions, and the runtime returns `None` safely when values exceed 64-bit boundaries.
+The LexLean model returns `Result UInt64 MatrixCostError`: any zero factor
+returns success with zero; nonzero products exceeding `UInt64` return `overflow`.
+`matmulFlops_canonical` verifies one example; `matmulFlops_zero_rows` proves the
+zero-row case for arbitrary remaining dimensions. The kernel-checked boundary
+corpus is finite, not a general overflow theorem or generated-runtime acceptance.
 
 ### 2.2 Formal Prefix KV-Cache Elision
-Prefix token caching avoids redundant attention computation over system prompts, few-shot examples, and session history:
-$$\text{effectiveTokens}(T_{\text{total}}, T_{\text{prefix}}) = \max(0, T_{\text{total}} - T_{\text{prefix}})$$
-In Lean 4:
-```lean
-def kvEffectiveTokens (totalTokens : UInt64) (prefixTokens : UInt64) : UInt64 :=
-  match checked_subtract totalTokens prefixTokens with
-  | none => 0
-  | some remaining => remaining
-```
-Proven unconditionally by theorem `kvEffectiveTokens_canonical`.
+The LexLean model returns `Result UInt64 KVPrefixError`: valid bounds return
+`totalTokens - prefixTokens`; `prefixTokens > totalTokens` returns
+`exceedsTotal(totalTokens, prefixTokens)`. Invalid bounds are not clamped.
+`kvEffectiveTokens_canonical` verifies one valid example. The regression checks
+49 boundary pairs and rejects a false invalid-prefix-success theorem.
+Remaining-token arithmetic does not establish prefix-cache reuse or resident KV
+memory savings: retained prefix allocations must still be counted and enforced
+by the actual generated runtime.
 
 ### 2.3 4-Way Fused Kernels (`FU-1`–`FU-4`)
 A kernel profile satisfies global optimality iff all 4 fusion stages are active with panel-packed tensors and folded warm starts:

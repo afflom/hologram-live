@@ -29,11 +29,14 @@ def expected_product(m, k, n):
     # Python integers retain the complete mathematical product, including zero
     # after a factor whose intermediate fixed-width product would overflow.
     product = 2 * m * k * n
+    error = {"kind": "constructor", "arguments": [], "type_arguments": [],
+             "constructor": {"module": "Hologram.Inference", "name": "MatrixCostError.overflow"}}
     return {
         "kind": "constructor",
-        "constructor": {"name": "Option.some" if product <= UINT64_MAX else "Option.none"},
-        "arguments": [integer(product)] if product <= UINT64_MAX else [],
-        "type_arguments": [{"kind": "uint64"}],
+        "constructor": {"name": "Result.ok" if product <= UINT64_MAX else "Result.error"},
+        "arguments": [integer(product) if product <= UINT64_MAX else error],
+        "type_arguments": [{"kind": "uint64"}, {"kind": "named", "arguments": [],
+                           "member": {"module": "Hologram.Inference", "name": "MatrixCostError"}}],
     }
 
 
@@ -97,7 +100,7 @@ def is_false_equation_rejection(result, *, prefix=False):
     """Bind negative evidence to a deliberately false arithmetic equation."""
     expression = ("Hologram.Inference.kvEffectiveTokens 0 1" if prefix else
                   "Hologram.Inference.matmulFlops { m := 0, k := 0, n := 0 }")
-    wrong_value = "Except.ok 0" if prefix else "some 1"
+    wrong_value = "Except.ok 0" if prefix else "Except.ok 1"
     expected = (
         "Lean rejected `PrismHologram.Checks` (error): Tactic `rfl` failed: "
         "The left-hand side\n"
@@ -214,7 +217,7 @@ child_timeout_ms = 300000
         for key, value in (("message", "unrelated elaboration failure"),
                            ("primary", {"path": "src/Hologram/Inference.lex.tex"}),
                            ("code", "LLV7001"),
-                           ("message", rejection["diagnostics"][0]["message"].replace("some 1", "some 2"))):
+                           ("message", rejection["diagnostics"][0]["message"].replace("Except.ok 1", "Except.ok 2"))):
             unrelated = json.loads(json.dumps(rejection))
             unrelated["diagnostics"][0][key] = value
             if is_false_equation_rejection(unrelated):
