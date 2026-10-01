@@ -72,6 +72,32 @@ def run(program, args, workspace, *, check=True):
     return result
 
 
+def is_false_equation_rejection(result):
+    """Bind negative evidence to the deliberately false zero-product equation."""
+    expected = (
+        "Lean rejected `PrismHologram.Checks` (error): Tactic `rfl` failed: "
+        "The left-hand side\n"
+        "  Hologram.Inference.matmulFlops { m := 0, k := 0, n := 0 }\n"
+        "is not definitionally equal to the right-hand side\n"
+        "  some 1\n\n"
+        "⊢ Hologram.Inference.matmulFlops { m := 0, k := 0, n := 0 } = some 1"
+    )
+    diagnostics = result.get("diagnostics", [])
+    return (
+        result.get("spec") == "lexlean/command-result/1"
+        and result.get("command") == "verify"
+        and result.get("success") is False
+        and result.get("exit_code") == 1
+        and len(diagnostics) == 1
+        and diagnostics[0].get("code") == "LLV7002"
+        and diagnostics[0].get("severity") == "error"
+        and diagnostics[0].get("primary", {}).get("path") == "src/Checks.lex.tex"
+        # Lean's pretty-printer may insert a blank line before the goal.
+        # Compare all tokens, not a substring or merely the diagnostic code.
+        and diagnostics[0].get("message", "").split() == expected.split()
+    )
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--evidence-directory", type=Path,
@@ -153,9 +179,19 @@ child_timeout_ms = 300000
                                              separators=(",", ":")) + footer, encoding="utf-8")
         rejected = run("lexlean", arguments, workspace, check=False)
         rejection = json.loads(rejected.stdout)
-        assert rejected.returncode != 0 and rejection["success"] is False
-        assert rejection["spec"] == "lexlean/command-result/1"
-        assert any(row["code"] == "LLV7002" for row in rejection["diagnostics"])
+        if rejected.returncode != 1 or not is_false_equation_rejection(rejection):
+            print(rejected.stdout, file=sys.stderr)
+            raise RuntimeError("compiler did not reject the intended false matrix equation")
+        # Mutate genuine compiler evidence: unrelated errors, sources, or
+        # equations must never be promoted into this negative acceptance claim.
+        for key, value in (("message", "unrelated elaboration failure"),
+                           ("primary", {"path": "src/Hologram/Inference.lex.tex"}),
+                           ("code", "LLV7001"),
+                           ("message", rejection["diagnostics"][0]["message"].replace("some 1", "some 2"))):
+            unrelated = json.loads(json.dumps(rejection))
+            unrelated["diagnostics"][0][key] = value
+            if is_false_equation_rejection(unrelated):
+                raise RuntimeError("unrelated compiler evidence accepted")
         report = {"schema": "hologram/inference-arithmetic-regression/1",
                           "source_sha256": hashlib.sha256(source).hexdigest(),
                           "expected_cases": len(cases), "verified_cases": len(cases),
