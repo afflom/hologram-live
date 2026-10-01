@@ -51,6 +51,15 @@ class LockTests(unittest.TestCase):
         image = SDK.locked_image(Path(__file__).resolve().parent.parent)
         self.assertTrue(image.startswith("ghcr.io/uor-foundation/prismpm-sdk-candidate@sha256:"))
 
+    def test_devcontainer_uses_same_sdk_and_bounded_build_storage(self):
+        root = Path(__file__).resolve().parent.parent
+        config = json.loads((root / ".devcontainer/devcontainer.json").read_text())
+        self.assertEqual(config["image"], SDK.locked_image(root))
+        self.assertEqual(config["containerUser"], "vscode")
+        self.assertEqual(config["containerEnv"]["CARGO_TARGET_DIR"], "/tmp/hologram-target")
+        self.assertIn("--tmpfs=/tmp:rw,exec,nosuid,nodev,size=2g,mode=1777", config["runArgs"])
+        self.assertNotIn("/var/run/docker.sock", json.dumps(config))
+
 
 class BudgetTests(unittest.TestCase):
     def test_timeout_bounds(self):

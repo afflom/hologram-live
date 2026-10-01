@@ -1,0 +1,57 @@
+name: SDK boundary regression
+
+on:
+  pull_request:
+    branches: [prismpm-hologram-live]
+    paths:
+      - scripts/prism-sdk.py
+      - scripts/test_prism_sdk.py
+      - .devcontainer/devcontainer.json
+      - .github/workflows/sdk-boundary.yml
+      - prismpm.lock
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sdk-boundary-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  boundary:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Resolve exact image and check runner reserve before acquisition
+        id: sdk
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import importlib.util
+          import os
+          from pathlib import Path
+          import shutil
+          spec = importlib.util.spec_from_file_location('sdk', 'scripts/prism-sdk.py')
+          sdk = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(sdk)
+          # Acquisition is explicit in CI, never performed by the local runner.
+          if shutil.disk_usage('.').free < 45 * sdk.GIB:
+              raise SystemExit('SDK acquisition requires 45 GiB free; use a larger runner')
+          image = sdk.locked_image(Path.cwd())
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write('image=' + image + '\n')
+          PY
+      - name: Acquire the declared immutable SDK on the hosted runner
+        env:
+          SDK_IMAGE: ${{ steps.sdk.outputs.image }}
+        run: docker pull "$SDK_IMAGE"
+      - name: Test the complete infrastructure regression suite in the SDK
+        run: python3 scripts/prism-sdk.py --timeout 120 -- python3 scripts/test_prism_sdk.py
+      - name: Validate configuration with the imported Dev Container schema oracle
+        run: python3 scripts/prism-sdk.py --timeout 120 -- devcontainer-validator .devcontainer/devcontainer.json
+      # This is additional infrastructure evidence, not application/model acceptance.
+      # Existing Rust, provider, conformance and release gates remain mandatory.
