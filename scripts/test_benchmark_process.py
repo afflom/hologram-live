@@ -4,10 +4,11 @@ import json
 import importlib.util
 from pathlib import Path
 import sys
+import subprocess
 import tempfile
 import unittest
 
-from benchmark_process import MeasurementError, measure, run_json, run_sample
+from benchmark_process import MeasurementError, measure, run_json, run_sample, report_run
 
 
 class MeasurementTests(unittest.TestCase):
@@ -32,6 +33,51 @@ class MeasurementTests(unittest.TestCase):
         module.BINARY_PATH = Path(sys.executable)
         with self.assertRaises(MeasurementError):
             module.run_ai_compare("7b", 4096, 2048, 16)
+
+    def test_cost_and_containment_do_not_suppress_command_failure(self):
+        module = self.load_script("compare-prism-performance.py")
+        module.BINARY_PATH = Path(sys.executable)
+        for collect in (module.benchmark_uor_cost_model, module.benchmark_working_set_containment):
+            with self.subTest(collect=collect.__name__), self.assertRaises(MeasurementError):
+                collect()
+
+    def test_missing_projection_is_a_recorded_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            report = Path(directory) / "report.json"
+            report.write_text('{"status":"completed"}')
+            result = subprocess.run([sys.executable,
+                str(Path(__file__).with_name("compare-prism-performance.py")),
+                "--build-dir", directory, "--output", str(report)], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("required projection missing", result.stderr)
+            self.assertEqual(json.loads(report.read_text())["status"], "failed")
+
+    def test_pinned_sdk_oracle_mismatch_cannot_validate_projections(self):
+        module = self.load_script("compare-prism-performance.py")
+        with tempfile.TemporaryDirectory() as directory:
+            projections = Path(directory) / "projections"
+            projections.mkdir()
+            # Deliberately invalid inputs must never be accepted, even if a
+            # local validator advertises the same executable name.
+            for filename in ("compose.json", "kubernetes.json"):
+                (projections / filename).write_text("{}")
+            with self.assertRaises(MeasurementError):
+                module.benchmark_cluster_projections(Path(directory))
+
+    def test_failure_replaces_prior_report_and_retains_samples(self):
+        with tempfile.TemporaryDirectory() as directory:
+            report = Path(directory) / "report.json"
+            report_run(report, lambda: measure(self.command("pass"), 2))
+            success = json.loads(report.read_text())
+            self.assertEqual(success["status"], "completed")
+            self.assertEqual(success["acceptance"], "not-established")
+            with self.assertRaises(MeasurementError):
+                report_run(report, lambda: measure(self.command("exit(7)"), 2))
+            failure = json.loads(report.read_text())
+            self.assertEqual(failure["status"], "failed")
+            self.assertEqual(failure["samples"][0]["returncode"], 7)
+            self.assertNotIn("diagnostics", failure)
+            self.assertEqual(list(Path(directory).iterdir()), [report])
 
     def command(self, source):
         return [sys.executable, "-c", source]
@@ -60,6 +106,7 @@ class MeasurementTests(unittest.TestCase):
             with self.assertRaises(MeasurementError) as caught:
                 measure(self.command(code), 3)
             self.assertIn("iteration 2/3", str(caught.exception))
+            self.assertEqual([s["returncode"] for s in caught.exception.samples], [0, 5])
             self.assertEqual(Path(path).read_text(), "2")
 
     def test_timeout_is_failure(self):

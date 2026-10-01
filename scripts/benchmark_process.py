@@ -14,13 +14,15 @@ import signal
 import statistics
 import subprocess
 import sys
+import tempfile
 import time
 
 
 class MeasurementError(RuntimeError):
-    def __init__(self, message, sample=None):
+    def __init__(self, message, sample=None, samples=None):
         super().__init__(message)
         self.sample = sample
+        self.samples = samples or ([] if sample is None else [sample])
 
 
 def _worker(command, timeout):
@@ -79,7 +81,7 @@ def measure(command, iterations=25, timeout=30):
         except MeasurementError as error:
             raise MeasurementError(
                 f"iteration {index + 1}/{iterations} failed; no successful aggregate: {error}",
-                error.sample) from error
+                error.sample, samples + error.samples) from error
         samples.append(sample)
     durations = sorted(sample["elapsed_ms"] for sample in samples)
     rss = [sample["peak_rss_mib"] for sample in samples]
@@ -112,6 +114,38 @@ def run_json(command, timeout=30):
     if not isinstance(result, dict):
         raise MeasurementError("command JSON must be an object", sample)
     return result, sample
+
+
+def write_report(path, report):
+    """Atomically replace diagnostics, never leaving a prior success after failure."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    text = json.dumps(report, indent=2, allow_nan=False) + "\n"
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent,
+                                         prefix=path.name + ".", delete=False) as stream:
+            temporary = Path(stream.name)
+            stream.write(text)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        if temporary is not None and temporary.exists():
+            temporary.unlink()
+
+
+def report_run(path, collect):
+    """Retain failure evidence; completion of diagnostics is not product acceptance."""
+    base = {"acceptance": "not-established", "started_at_unix": time.time()}
+    write_report(path, {**base, "status": "running"})
+    try:
+        result = collect()
+        write_report(path, {**base, "status": "completed", "diagnostics": result})
+    except Exception as error:
+        write_report(path, {**base, "status": "failed", "error": str(error),
+                            "samples": getattr(error, "samples", [])})
+        raise
 
 
 if __name__ == "__main__":

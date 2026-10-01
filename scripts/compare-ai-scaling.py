@@ -5,9 +5,10 @@ Only process spawn-to-exit latency is measured. Memory, traffic, dispatch and
 containment fields are unvalidated formula outputs, not empirical evidence.
 """
 
-import json
+import argparse
+import sys
 from pathlib import Path
-from benchmark_process import run_json
+from benchmark_process import run_json, report_run
 
 BINARY_PATH = Path("target/release/hologram")
 if not BINARY_PATH.exists():
@@ -31,7 +32,7 @@ def run_ai_compare(model: str, context_len: int, prefix_tokens: int, budget_gb: 
     return res
 
 
-def main():
+def collect():
     print("=" * 80)
     print("  Hologram-AI cost-model estimates (not measured inference performance)")
     print(f"  Binary: {BINARY_PATH} ({BINARY_PATH.stat().st_size / 1_000_000:.1f} MB)")
@@ -117,11 +118,20 @@ def main():
     print("-" * 105)
     print()
 
-    out_file = Path("target/ai-scaling-comparison.json")
-    out_file.parent.mkdir(parents=True, exist_ok=True)
-    out_file.write_text(json.dumps(results, indent=2))
-    print(f"Detailed AI scaling comparison report written to {out_file}")
+    return {"cases": results, "expected_cases": len(scenarios), "executed_cases": len(results)}
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--output", type=Path, default=Path("target/ai-scaling-comparison.json"))
+    args = parser.parse_args()
+    try:
+        report_run(args.output, collect)
+    except Exception as error:
+        print(f"diagnostics failed: {error}", file=sys.stderr)
+        return 1
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
