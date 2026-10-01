@@ -80,6 +80,21 @@ class MeasurementTests(unittest.TestCase):
             self.assertNotIn("diagnostics", failure)
             self.assertEqual(list(Path(directory).iterdir()), [report])
 
+    def test_failure_in_later_scenario_retains_all_prior_invocations(self):
+        with tempfile.TemporaryDirectory() as directory:
+            report = Path(directory) / "report.json"
+            def collect():
+                measure(self.command("print('first scenario')"), 2)
+                run_json(self.command("print('{\"scenario\":2}')"))
+                run_sample(self.command("exit(9)"))
+            with self.assertRaises(MeasurementError):
+                report_run(report, collect)
+            evidence = json.loads(report.read_text())
+            self.assertEqual(evidence["status"], "failed")
+            self.assertEqual([s["returncode"] for s in evidence["invocations"]], [0, 0, 0, 9])
+            self.assertIn("stdout_sha256", evidence["invocations"][0])
+            self.assertNotIn("stdout", evidence["invocations"][0])
+
     def command(self, source):
         return [sys.executable, "-c", source]
 

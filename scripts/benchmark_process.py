@@ -11,6 +11,8 @@ import ctypes
 import math
 import os
 from pathlib import Path
+from contextvars import ContextVar
+import hashlib
 import signal
 import selectors
 import statistics
@@ -29,6 +31,7 @@ class MeasurementError(RuntimeError):
 
 
 OUTPUT_LIMIT = 1024 * 1024
+_RECORDER = ContextVar("benchmark_recorder", default=None)
 
 
 def _children():
@@ -129,7 +132,7 @@ def _worker(command, timeout):
             **{key: data.decode("utf-8", errors="replace") for key, data in buffers.items()}}
 
 
-def run_sample(command, timeout=30):
+def _run_sample(command, timeout=30):
     if not command or not math.isfinite(timeout) or timeout <= 0:
         raise ValueError("a command and positive finite timeout are required")
     if _children():
@@ -164,6 +167,19 @@ def run_sample(command, timeout=30):
         raise MeasurementError(
             f"command did not complete successfully ({sample['status']}, "
             f"exit {sample['returncode']}): {sample['stderr'][:1024]}", sample)
+    return sample
+
+
+def run_sample(command, timeout=30):
+    try:
+        sample = _run_sample(command, timeout)
+    except MeasurementError as error:
+        sample = error.sample or {"command": command, "status": "failed", "error": str(error)}
+        if _RECORDER.get() is not None:
+            _RECORDER.get()(sample)
+        raise
+    if _RECORDER.get() is not None:
+        _RECORDER.get()(sample)
     return sample
 
 
@@ -239,14 +255,27 @@ def write_report(path, report):
 def report_run(path, collect):
     """Retain failure evidence; completion of diagnostics is not product acceptance."""
     base = {"acceptance": "not-established", "started_at_unix": time.time()}
-    write_report(path, {**base, "status": "running"})
+    journal = []
+    def record(sample):
+        entry = {key: value for key, value in sample.items() if key not in ("stdout", "stderr")}
+        # Bind captured output without publishing potentially sensitive CLI text.
+        for key in ("stdout", "stderr"):
+            if key in sample:
+                entry[key + "_sha256"] = hashlib.sha256(sample[key].encode()).hexdigest()
+        journal.append(entry)
+        write_report(path, {**base, "status": "running", "invocations": journal})
+    token = _RECORDER.set(record)
     try:
+        write_report(path, {**base, "status": "running", "invocations": journal})
         result = collect()
-        write_report(path, {**base, "status": "completed", "diagnostics": result})
+        write_report(path, {**base, "status": "completed", "diagnostics": result,
+                            "invocations": journal})
     except Exception as error:
         write_report(path, {**base, "status": "failed", "error": str(error),
-                            "samples": getattr(error, "samples", [])})
+                            "samples": getattr(error, "samples", []), "invocations": journal})
         raise
+    finally:
+        _RECORDER.reset(token)
 
 
 if __name__ == "__main__":
