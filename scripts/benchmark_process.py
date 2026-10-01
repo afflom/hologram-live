@@ -7,14 +7,17 @@ Authority: https://docs.python.org/3/library/resource.html#resource.RUSAGE_CHILD
 """
 
 import json
+import ctypes
 import math
 import os
 from pathlib import Path
 import signal
+import selectors
 import statistics
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 
 
@@ -25,41 +28,134 @@ class MeasurementError(RuntimeError):
         self.samples = samples or ([] if sample is None else [sample])
 
 
+OUTPUT_LIMIT = 1024 * 1024
+
+
+def _children():
+    return [int(pid) for pid in Path(f"/proc/self/task/{os.getpid()}/children").read_text().split()]
+
+
+def _subreaper(enable):
+    # Verification runs in the pinned Linux SDK on every host platform.
+    # Linux man-pages: PR_SET_CHILD_SUBREAPER(2const). Never reap other work.
+    if not sys.platform.startswith("linux") or threading.active_count() != 1:
+        raise ValueError("use a single-threaded process inside the pinned Linux SDK")
+    if signal.getsignal(signal.SIGCHLD) != signal.SIG_DFL:
+        raise ValueError("measurement supervisor requires exclusive child reaping")
+    libc = ctypes.CDLL(None, use_errno=True)
+    previous = ctypes.c_int()
+    if libc.prctl(37, ctypes.byref(previous), 0, 0, 0) != 0:
+        raise OSError(ctypes.get_errno(), "cannot read subreaper state")
+    if libc.prctl(36, ctypes.c_ulong(int(enable)), 0, 0, 0) != 0:
+        raise OSError(ctypes.get_errno(), "cannot establish subreaper state")
+    return previous.value
+
+
+def _cleanup_children():
+    """Signal only owned, unreaped children; adopted descendants are reaped too."""
+    deadline = time.monotonic() + 2
+    killed = 0
+    while time.monotonic() < deadline:
+        try:
+            while os.waitpid(-1, os.WNOHANG)[0]:
+                pass
+        except ChildProcessError:
+            return True, killed  # ECHILD, not merely a transient empty /proc list.
+        for pid in _children():
+            try:
+                descriptor = os.pidfd_open(pid)
+                try:
+                    signal.pidfd_send_signal(descriptor, signal.SIGKILL)
+                    killed += 1
+                finally:
+                    os.close(descriptor)
+            except ProcessLookupError:
+                pass
+        time.sleep(.005)
+    return False, killed
+
+
 def _worker(command, timeout):
+    import resource
+    _subreaper(True)
     started = time.perf_counter()
+    buffers = {"stdout": bytearray(), "stderr": bytearray()}
+    status = "completed"
     process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                               start_new_session=(os.name == "posix"))
-    timed_out = False
+                               start_new_session=True)
     try:
-        stdout, stderr = process.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        timed_out = True
-        if os.name == "posix":
-            os.killpg(process.pid, signal.SIGKILL)
-        else:
+        with selectors.DefaultSelector() as selector:
+            for label, stream in (("stdout", process.stdout), ("stderr", process.stderr)):
+                os.set_blocking(stream.fileno(), False)
+                selector.register(stream, selectors.EVENT_READ, label)
+            while process.poll() is None or selector.get_map():
+                remaining = timeout - (time.perf_counter() - started)
+                if remaining <= 0:
+                    status = "timeout"
+                    break
+                if process.poll() is not None and _children():
+                    status = "descendants-survived"
+                    break
+                for key, _ in selector.select(min(remaining, .02)):
+                    data = os.read(key.fd, 65536)
+                    if not data:
+                        selector.unregister(key.fileobj)
+                        continue
+                    available = OUTPUT_LIMIT - sum(map(len, buffers.values()))
+                    buffers[key.data].extend(data[:available])
+                    if len(data) > available:
+                        status = "output-limit"
+                        break
+                if status != "completed":
+                    break
+    finally:
+        if process.poll() is None:
             process.kill()
-        stdout, stderr = process.communicate()
-    elapsed = (time.perf_counter() - started) * 1000
-    rss = None
-    if sys.platform.startswith("linux") or sys.platform == "darwin":
-        import resource
-        raw = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss
-        rss = raw / (1024 if sys.platform.startswith("linux") else 1024**2)
-    return {"status": "timeout" if timed_out else "completed",
-            "returncode": process.returncode, "elapsed_ms": elapsed,
-            "peak_rss_mib": rss, "stdout": stdout.decode("utf-8", errors="replace"),
-            "stderr": stderr.decode("utf-8", errors="replace")}
+            try:
+                process.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                status = "cleanup-failed"
+        clean, killed = _cleanup_children()
+        process.stdout.close()
+        process.stderr.close()
+    if not clean:
+        status = "cleanup-failed"
+    elif killed and status == "completed":
+        status = "descendants-survived"
+    return {"status": status, "command": command,
+            "returncode": process.returncode, "elapsed_ms": (time.perf_counter() - started) * 1000,
+            "cleanup_confirmed": clean, "output_limit_bytes": OUTPUT_LIMIT,
+            "peak_rss_mib": resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss / 1024,
+            **{key: data.decode("utf-8", errors="replace") for key, data in buffers.items()}}
 
 
 def run_sample(command, timeout=30):
     if not command or not math.isfinite(timeout) or timeout <= 0:
         raise ValueError("a command and positive finite timeout are required")
-    worker = subprocess.run(
-        [sys.executable, str(Path(__file__).resolve()), json.dumps(command), str(timeout)],
-        capture_output=True, text=True, timeout=timeout + 10,
-    )
+    if _children():
+        raise MeasurementError("measurement supervisor must not own unrelated child processes")
+    previous = _subreaper(True)
+    started = time.perf_counter()
+    failure = None
+    try:
+        worker = subprocess.run(
+            [sys.executable, str(Path(__file__).resolve()), json.dumps(command), str(timeout)],
+            capture_output=True, text=True, timeout=timeout + 5,
+        )
+    except (subprocess.TimeoutExpired, KeyboardInterrupt, OSError) as error:
+        failure = error
+    finally:
+        clean, killed = _cleanup_children()
+        _subreaper(previous)
+    if failure is not None or not clean or killed:
+        sample = {"command": command, "status": "worker-failed" if clean else "cleanup-failed",
+                  "elapsed_ms": (time.perf_counter() - started) * 1000,
+                  "cleanup_confirmed": clean, "error": str(failure), "returncode": None}
+        raise MeasurementError("worker execution failed; no successful sample", sample) from failure
     if worker.returncode:
-        raise MeasurementError("measurement worker failed: " + worker.stderr[:1024])
+        sample = {"command": command, "status": "worker-failed", "returncode": worker.returncode,
+                  "cleanup_confirmed": clean, "stderr": worker.stderr[:1024]}
+        raise MeasurementError("measurement worker failed: " + worker.stderr[:1024], sample)
     try:
         sample = json.loads(worker.stdout)
     except (ValueError, TypeError) as error:
@@ -107,8 +203,13 @@ def run_json(command, timeout=30):
     sample = run_sample(command, timeout)
     def reject_nonfinite(value):
         raise ValueError(f"non-finite JSON number: {value}")
+    def finite_float(value):
+        result = float(value)
+        if not math.isfinite(result):
+            reject_nonfinite(value)
+        return result
     try:
-        result = json.loads(sample["stdout"], parse_constant=reject_nonfinite)
+        result = json.loads(sample["stdout"], parse_constant=reject_nonfinite, parse_float=finite_float)
     except ValueError as error:
         raise MeasurementError("command returned invalid JSON", sample) from error
     if not isinstance(result, dict):

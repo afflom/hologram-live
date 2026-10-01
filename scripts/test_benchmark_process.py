@@ -6,6 +6,7 @@ from pathlib import Path
 import sys
 import subprocess
 import tempfile
+import time
 import unittest
 
 from benchmark_process import MeasurementError, measure, run_json, run_sample, report_run
@@ -114,6 +115,61 @@ class MeasurementTests(unittest.TestCase):
             run_sample(self.command("import time; time.sleep(30)"), timeout=.1)
         self.assertEqual(caught.exception.sample["status"], "timeout")
 
+    def test_detached_descendants_are_reaped_on_timeout_and_root_exit(self):
+        for root_sleeps in (True, False):
+            with self.subTest(root_sleeps=root_sleeps), tempfile.TemporaryDirectory() as directory:
+                marker = Path(directory) / "pid"
+                child = "import time; time.sleep(30)"
+                code = ("import subprocess,sys,time; from pathlib import Path; "
+                        f"p=subprocess.Popen([sys.executable,'-c',{child!r}],start_new_session=True); "
+                        f"Path({str(marker)!r}).write_text(str(p.pid)); "
+                        + ("time.sleep(30)" if root_sleeps else "sys.exit(0)"))
+                started = time.monotonic()
+                with self.assertRaises(MeasurementError) as caught:
+                    run_sample(self.command(code), timeout=.3)
+                self.assertLess(time.monotonic() - started, 3)
+                self.assertTrue(caught.exception.sample["cleanup_confirmed"])
+                self.assertIn(caught.exception.sample["status"], ("timeout", "descendants-survived"))
+                self.assertFalse(Path(f"/proc/{int(marker.read_text())}").exists())
+
+    def test_worker_death_preserves_failure_and_reaps_target(self):
+        with tempfile.TemporaryDirectory() as directory:
+            marker = Path(directory) / "pid"
+            code = ("import os,signal,time; from pathlib import Path; "
+                    f"Path({str(marker)!r}).write_text(str(os.getpid())); "
+                    "os.kill(os.getppid(),signal.SIGKILL); time.sleep(30)")
+            with self.assertRaises(MeasurementError) as caught:
+                measure(self.command(code), 2, timeout=.3)
+            self.assertTrue(caught.exception.sample["cleanup_confirmed"])
+            self.assertEqual(len(caught.exception.samples), 1)
+            self.assertFalse(Path(f"/proc/{int(marker.read_text())}").exists())
+
+    def test_continuous_output_is_bounded_and_failed(self):
+        code = "import os\nwhile True: os.write(1,b'x'*65536)"
+        with self.assertRaises(MeasurementError) as caught:
+            run_sample(self.command(code), timeout=2)
+        sample = caught.exception.sample
+        self.assertEqual(sample["status"], "output-limit")
+        self.assertTrue(sample["cleanup_confirmed"])
+        self.assertLessEqual(len(sample["stdout"]) + len(sample["stderr"]), sample["output_limit_bytes"])
+
+    def test_stopped_worker_timeout_retains_prior_sample(self):
+        with tempfile.TemporaryDirectory() as directory:
+            counter = Path(directory) / "count"
+            marker = Path(directory) / "pid"
+            code = ("import os,signal,time; from pathlib import Path; "
+                    f"p=Path({str(counter)!r}); n=int(p.read_text()) if p.exists() else 0; "
+                    "p.write_text(str(n+1)); "
+                    f"Path({str(marker)!r}).write_text(str(os.getpid())); "
+                    "os.kill(os.getppid(),signal.SIGSTOP) if n else None; "
+                    "time.sleep(30) if n else None")
+            with self.assertRaises(MeasurementError) as caught:
+                measure(self.command(code), 2, timeout=.2)
+            self.assertEqual(len(caught.exception.samples), 2)
+            self.assertEqual(caught.exception.samples[0]["returncode"], 0)
+            self.assertTrue(caught.exception.sample["cleanup_confirmed"])
+            self.assertFalse(Path(f"/proc/{int(marker.read_text())}").exists())
+
     def test_missing_executable_is_failure(self):
         with self.assertRaises(MeasurementError):
             run_sample(["/nonexistent/hologram-benchmark-executable"])
@@ -123,7 +179,8 @@ class MeasurementTests(unittest.TestCase):
         self.assertEqual(result, {"ok": True})
         self.assertGreater(sample["elapsed_ms"], 0)
         for source in ("print('not-json')", "print('[]')", "print('{}'); exit(2)",
-                       "print('{\"value\": NaN}')", "print('{\"value\": Infinity}')"):
+                       "print('{\"value\": NaN}')", "print('{\"value\": Infinity}')",
+                       "print('{\"value\": 1e999}')", "print('{\"nested\": [{\"value\": -1e999}]}')"):
             with self.subTest(source=source), self.assertRaises(MeasurementError):
                 run_json(self.command(source))
 
