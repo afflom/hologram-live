@@ -133,9 +133,13 @@ def require_general_arithmetic_contract(core):
     excess_name = "PrismHologram.Hologram.InferenceProofs.kvEffectiveTokens_excess_prefix"
     bounded_name = "PrismHologram.Hologram.InferenceProofs.checkedFromNat_bounded"
     valid_name = "PrismHologram.Hologram.InferenceProofs.kvEffectiveTokens_valid_prefix"
-    expected_names = {prefix + "inner", prefix + "columns", prefix_name, excess_name, bounded_name, valid_name}
+    overflow_name = "PrismHologram.Hologram.InferenceProofs.checkedFromNat_overflow"
+    multiply_bounded = "PrismHologram.Hologram.InferenceProofs.checkedMultiply_bounded"
+    multiply_overflow = "PrismHologram.Hologram.InferenceProofs.checkedMultiply_overflow"
+    expected_names = {prefix + "inner", prefix + "columns", prefix_name, excess_name, bounded_name, valid_name,
+                      overflow_name, multiply_bounded, multiply_overflow}
     declarations = core["declarations"]
-    if len(declarations) != 6 or {row["name"] for row in declarations} != expected_names:
+    if len(declarations) != 9 or {row["name"] for row in declarations} != expected_names:
         raise RuntimeError("general arithmetic theorem inventory changed")
     zero_level = {"k": "z"}
     one_level = {"k": "s", "a": zero_level}
@@ -200,7 +204,7 @@ def require_general_arithmetic_contract(core):
                                         apply(constant("UInt64.toNat"), {"k": "b", "i": 1}))
                     within["v"] = apply(constant("Eq", (one_level,)), prefix_result,
                                         apply(constant(namespace + "kvEffectiveTokens"), total, cached), valid_success)
-        if declaration["name"] == bounded_name:
+        if declaration["name"] in (bounded_name, overflow_name):
             natural = constant("Nat")
             value = {"k": "b", "i": 1}
             option = apply(constant("Option", (zero_level,)), uint)
@@ -213,6 +217,28 @@ def require_general_arithmetic_contract(core):
             expected = {"k": "p", "n": "value", "b": "e", "t": natural, "v": {
                 "k": "p", "n": "bounded", "b": "e", "t": bound,
                 "v": apply(constant("Eq", (one_level,)), option, checked, bounded_success)}}
+            if declaration["name"] == overflow_name:
+                expected["v"]["n"] = "overflow"
+                expected["v"]["t"] = apply(constant("Nat.le"), {"k": "n", "v": "18446744073709551616"}, {"k": "b", "i": 0})
+                expected["v"]["v"] = apply(constant("Eq", (one_level,)), option, checked,
+                                           apply(constant("Option.none", (zero_level,)), uint))
+        if declaration["name"] in (multiply_bounded, multiply_overflow):
+            bounded = declaration["name"] == multiply_bounded
+            option = apply(constant("Option", (zero_level,)), uint)
+            product = apply(constant("Nat.mul"), apply(constant("UInt64.toNat"), {"k": "b", "i": 2}),
+                            apply(constant("UInt64.toNat"), {"k": "b", "i": 1}))
+            input_product = apply(constant("Nat.mul"), apply(constant("UInt64.toNat"), {"k": "b", "i": 1}),
+                                  apply(constant("UInt64.toNat"), {"k": "b", "i": 0}))
+            size = {"k": "n", "v": "18446744073709551616"}
+            relation = apply(constant("Nat.lt"), input_product, size) if bounded else apply(constant("Nat.le"), size, input_product)
+            output = (apply(constant("Option.some", (zero_level,)), uint, apply(constant("UInt64.ofNat"), product))
+                      if bounded else apply(constant("Option.none", (zero_level,)), uint))
+            checked = apply(constant(namespace + "LexLeanRuntime.checkedMultiply"), uint,
+                            constant(namespace + "LexLeanRuntime.instFixedUInt64"), {"k": "b", "i": 2}, {"k": "b", "i": 1})
+            expected = {"k": "p", "n": "left", "b": "e", "t": uint, "v": {
+                "k": "p", "n": "right", "b": "e", "t": uint, "v": {
+                    "k": "p", "n": "bounded" if bounded else "overflow", "b": "e", "t": relation,
+                    "v": apply(constant("Eq", (one_level,)), option, checked, output)}}}
         if (declaration["kind"] != "theorem" or declaration["levels"] != []
                 or declaration["policy"] != {"kind": "exact", "axioms": ["Quot.sound", "propext"]}
                 or declaration.get("generated", False) is not False
@@ -317,6 +343,34 @@ def is_false_arithmetic_rejection(result, name):
   but it is expected to have type
     ∀ (_ __1 : UInt64),
       __1.toNat.le _.toNat → PrismHologram.Hologram.Inference.kvEffectiveTokens _ __1 = Except.ok (UInt64.ofNat 1)""",
+        "conversion-overflow": """Lean rejected `PrismHologram.Hologram.InferenceProofs` (error): native core declaration 'PrismHologram.Hologram.InferenceProofs.checkedFromNat_overflow':
+  (kernel) declaration type mismatch, 'PrismHologram.Hologram.InferenceProofs.checkedFromNat_overflow' has type
+    ∀ (_ : Nat),
+      Nat.le 18446744073709551616 _ →
+        PrismHologram.Hologram.Inference.LexLeanRuntime.checkedFromInt (Int.ofNat _) = none
+  but it is expected to have type
+    ∀ (_ : Nat),
+      Nat.le 18446744073709551616 _ →
+        PrismHologram.Hologram.Inference.LexLeanRuntime.checkedFromInt (Int.ofNat _) = some (UInt64.ofNat 1)""",
+        "multiply-bounded": """Lean rejected `PrismHologram.Hologram.InferenceProofs` (error): native core declaration 'PrismHologram.Hologram.InferenceProofs.checkedMultiply_bounded':
+  (kernel) declaration type mismatch, 'PrismHologram.Hologram.InferenceProofs.checkedMultiply_bounded' has type
+    ∀ (_ __1 : UInt64),
+      (_.toNat.mul __1.toNat).lt 18446744073709551616 →
+        PrismHologram.Hologram.Inference.LexLeanRuntime.checkedFromInt (Int.ofNat (_.toNat.mul __1.toNat)) =
+          some (UInt64.ofNat (_.toNat.mul __1.toNat))
+  but it is expected to have type
+    ∀ (_ __1 : UInt64),
+      (_.toNat.mul __1.toNat).lt 18446744073709551616 →
+        PrismHologram.Hologram.Inference.LexLeanRuntime.checkedMultiply _ __1 = some (UInt64.ofNat 1)""",
+        "multiply-overflow": """Lean rejected `PrismHologram.Hologram.InferenceProofs` (error): native core declaration 'PrismHologram.Hologram.InferenceProofs.checkedMultiply_overflow':
+  (kernel) declaration type mismatch, 'PrismHologram.Hologram.InferenceProofs.checkedMultiply_overflow' has type
+    ∀ (_ __1 : UInt64),
+      Nat.le 18446744073709551616 (_.toNat.mul __1.toNat) →
+        PrismHologram.Hologram.Inference.LexLeanRuntime.checkedFromInt (Int.ofNat (_.toNat.mul __1.toNat)) = none
+  but it is expected to have type
+    ∀ (_ __1 : UInt64),
+      Nat.le 18446744073709551616 (_.toNat.mul __1.toNat) →
+        PrismHologram.Hologram.Inference.LexLeanRuntime.checkedMultiply _ __1 = some (UInt64.ofNat 1)""",
     }
     return is_kernel_rejection(result, expected[name])
 
@@ -373,27 +427,25 @@ def main():
     core_line = next(line for line in proof_text.splitlines() if line.startswith("\\coredata{"))
     core = json.loads(core_line[len("\\coredata{"):-1])
     require_general_arithmetic_contract(core)
-    for change in ("omitted-inner", "omitted-columns", "omitted-prefix", "omitted-excess", "omitted-bounded", "omitted-valid",
-                   "weakened", "weakened-prefix", "weakened-excess", "weakened-bounded", "weakened-valid", "policy"):
-        changed = json.loads(json.dumps(core))
-        if change.startswith("omitted-"):
-            changed["declarations"].pop({"omitted-inner": 0, "omitted-columns": 1,
-                                         "omitted-prefix": 2, "omitted-excess": 3,
-                                         "omitted-bounded": 4, "omitted-valid": 5}[change])
-        elif change.startswith("weakened"):
-            # Remove a quantified argument from the actual source statement.
-            declaration = changed["declarations"][{"weakened": 1, "weakened-prefix": 2,
-                                                   "weakened-excess": 3, "weakened-bounded": 4,
-                                                   "weakened-valid": 5}[change]]
-            declaration["type"] = changed["nodes"][declaration["type"]]["v"]
-        else:
-            changed["declarations"][1]["policy"] = {"kind": "allow", "axioms": ["Quot.sound", "propext"]}
-        try:
-            require_general_arithmetic_contract(changed)
-        except RuntimeError:
-            pass
-        else:
-            raise RuntimeError(f"{change} theorem contract was accepted")
+    inventory_mutations = 2  # The two semantic zero-row checks above.
+    for declaration_index in range(len(core["declarations"])):
+        for change in ("omitted", "weakened", "policy"):
+            changed = json.loads(json.dumps(core))
+            if change == "omitted":
+                changed["declarations"].pop(declaration_index)
+            elif change == "weakened":
+                # Remove one actual quantified argument, not a synthetic claim.
+                declaration = changed["declarations"][declaration_index]
+                declaration["type"] = changed["nodes"][declaration["type"]]["v"]
+            else:
+                changed["declarations"][declaration_index]["policy"] = {
+                    "kind": "allow", "axioms": ["Quot.sound", "propext"]}
+            try:
+                require_general_arithmetic_contract(changed)
+            except RuntimeError:
+                inventory_mutations += 1
+            else:
+                raise RuntimeError(f"{change} theorem contract was accepted")
     values = (0, 1, 2, (1 << 32) - 1, 1 << 32, 1 << 63, UINT64_MAX)
     cases = list(itertools.product(values, repeat=3))
     cases.extend(((1, 1, UINT64_MAX // 2), (1, 1, UINT64_MAX // 2 + 1), (1 << 63, 0, 10)))
@@ -591,7 +643,8 @@ child_timeout_ms = 300000
             if is_false_excess_prefix_rejection(unrelated):
                 raise RuntimeError("unrelated excess-prefix kernel rejection accepted")
         arithmetic_rejections = {}
-        for name, declaration_index in (("bounded", 4), ("valid", 5)):
+        for name, declaration_index in (("bounded", 4), ("valid", 5), ("conversion-overflow", 6),
+                                        ("multiply-bounded", 7), ("multiply-overflow", 8)):
             core = json.loads(core_line[len("\\coredata{"):-1])
             nodes = core["nodes"]
             declaration = core["declarations"][declaration_index]
@@ -604,6 +657,8 @@ child_timeout_ms = 300000
             goal = dict(nodes[index])
             success = dict(nodes[goal["x"]])
             success["x"] = app(constant_index("UInt64.ofNat"), append({"k": "n", "v": "1"}))
+            if name in ("conversion-overflow", "multiply-overflow"):
+                success["f"] = app(constant_index("Option.some"), constant_index("UInt64"))
             goal["x"] = append(success)
             index = append(goal)
             for binder in reversed(binders):
@@ -637,9 +692,11 @@ child_timeout_ms = 300000
                           "false_general_excess_clamping_rejected": True,
                           "false_bounded_conversion_rejected": True,
                           "false_valid_prefix_rejected": True,
-                          "proof_inventory_mutations_rejected": 14,
+                          "false_checked_multiplication_rejected": True,
+                          "kernel_rejection_cases": 10,
+                          "proof_inventory_mutations_rejected": inventory_mutations,
                           "verification": verification,
-                          "scope": "LexLean matrix and prefix boundary equations; general zero-factor and full-domain prefix proofs",
+                          "scope": "LexLean matrix and prefix boundary equations; general zero-factor, prefix and checked-multiplication proofs",
                           "product_acceptance": "not-established"}
         if options.evidence_directory is not None:
             (options.evidence_directory / "false-equation-result.json").write_text(
