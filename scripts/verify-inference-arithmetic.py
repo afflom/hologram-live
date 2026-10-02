@@ -125,6 +125,90 @@ def is_false_equation_rejection(result, *, prefix=False):
     )
 
 
+def require_zero_proof_contract(core):
+    """Check statements independently of proof bodies and DAG node numbering."""
+    namespace = "PrismHologram.Hologram.Inference."
+    prefix = "PrismHologram.Hologram.InferenceProofs.matmulFlops_zero_"
+    expected_names = {prefix + "inner", prefix + "columns"}
+    declarations = core["declarations"]
+    if len(declarations) != 2 or {row["name"] for row in declarations} != expected_names:
+        raise RuntimeError("general zero-factor theorem inventory changed")
+    zero_level = {"k": "z"}
+    one_level = {"k": "s", "a": zero_level}
+    def constant(name, levels=()):
+        return {"k": "c", "n": name, "u": list(levels)}
+    def apply(function, *arguments):
+        for argument in arguments:
+            function = {"k": "a", "f": function, "x": argument}
+        return function
+    uint = constant("UInt64")
+    zero = apply(constant("UInt64.ofNat"), {"k": "n", "v": "0"})
+    error = constant(namespace + "MatrixCostError")
+    result = apply(constant("Except", (zero_level, zero_level)), error, uint)
+    success = apply(constant("Except.ok", (zero_level, zero_level)), error, uint, zero)
+    def expand(index, budget):
+        budget[0] -= 1
+        if budget[0] < 0:
+            raise RuntimeError("proof statement exceeds inventory inspection bound")
+        node = dict(core["nodes"][index])
+        for child in {"a": ("f", "x"), "p": ("t", "v")}.get(node["k"], ()):
+            node[child] = expand(node[child], budget)
+        return node
+    for declaration in declarations:
+        columns = declaration["name"] == prefix + "columns"
+        dimensions = [{"k": "b", "i": 1}, {"k": "b", "i": 0}, zero] if columns else [
+            {"k": "b", "i": 1}, zero, {"k": "b", "i": 0}]
+        matrix = apply(constant(namespace + "MatrixDimension.mk"), *dimensions)
+        goal = apply(constant("Eq", (one_level,)), result,
+                     apply(constant(namespace + "matmulFlops"), matrix), success)
+        expected = {"k": "p", "n": "m", "b": "e", "t": uint, "v": {
+            "k": "p", "n": "k" if columns else "n", "b": "e", "t": uint, "v": goal}}
+        if (declaration["kind"] != "theorem" or declaration["levels"] != []
+                or declaration["policy"] != {"kind": "exact", "axioms": ["Quot.sound", "propext"]}
+                or declaration.get("generated", False) is not False
+                or expand(declaration["type"], [4096]) != expected):
+            raise RuntimeError("general zero-factor theorem statement or policy changed")
+
+
+def require_zero_rows_contract(model):
+    expected = theorem(0, (0, 0, 0))
+    expected["name"] = "matmulFlops_zero_rows"
+    expected["parameters"] = [{"name": name, "type": {"kind": "uint64"}} for name in ("k", "n")]
+    fields = expected["statement"]["left"]["arguments"][0]["fields"]
+    for field in fields[1:]:
+        field["value"] = {"kind": "var", "name": field["field"]}
+    def localize(value):
+        if isinstance(value, list):
+            return [localize(item) for item in value]
+        if isinstance(value, dict):
+            return {key: localize(item) for key, item in value.items() if key != "module"}
+        return value
+    rows = [row for row in model["declarations"] if row.get("name") == "matmulFlops_zero_rows"]
+    if rows != [localize(expected)]:
+        raise RuntimeError("general zero-row theorem contract changed")
+
+
+def is_false_general_rejection(result):
+    expected = """Lean rejected `PrismHologram.Hologram.InferenceProofs` (error): native core declaration 'PrismHologram.Hologram.InferenceProofs.matmulFlops_zero_inner':
+  (kernel) declaration type mismatch, 'PrismHologram.Hologram.InferenceProofs.matmulFlops_zero_inner' has type
+    ∀ (_ __1 : UInt64),
+      (fun __2 => PrismHologram.Hologram.Inference.guardedMatmulFlops __2 { m := _, k := UInt64.ofNat 0, n := __1 })
+          (PrismHologram.Hologram.Inference.dimensionIsZero _ || true) =
+        (fun __2 => PrismHologram.Hologram.Inference.guardedMatmulFlops __2 { m := _, k := UInt64.ofNat 0, n := __1 })
+          true
+  but it is expected to have type
+    ∀ (_ __1 : UInt64),
+      PrismHologram.Hologram.Inference.matmulFlops { m := _, k := UInt64.ofNat 0, n := __1 } =
+        Except.ok (UInt64.ofNat 1)"""
+    diagnostics = result.get("diagnostics", [])
+    return (result.get("spec") == "lexlean/command-result/1" and result.get("command") == "verify"
+            and result.get("success") is False and result.get("exit_code") == 1
+            and len(diagnostics) == 1 and diagnostics[0].get("code") == "LLV7002"
+            and diagnostics[0].get("severity") == "error"
+            and diagnostics[0].get("primary", {}).get("path") == "src/Hologram/InferenceProofs.lex.tex"
+            and diagnostics[0].get("message", "").split() == expected.split())
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--evidence-directory", type=Path,
@@ -139,6 +223,23 @@ def main():
         source = handle.read(4194305)
     if len(source) > 4194304:
         raise RuntimeError("matrix model exceeds the compiler source limit")
+    semantic_line = next(line for line in source.decode("utf-8").splitlines()
+                         if line.startswith("\\semanticdata{"))
+    model = json.loads(semantic_line[len("\\semanticdata{"):-1])
+    require_zero_rows_contract(model)
+    for change in ("omitted", "weakened"):
+        changed = json.loads(json.dumps(model))
+        row = next(row for row in changed["declarations"] if row.get("name") == "matmulFlops_zero_rows")
+        if change == "omitted":
+            changed["declarations"].remove(row)
+        else:
+            row["statement"]["left"]["arguments"][0]["fields"][1]["value"] = integer(0)
+        try:
+            require_zero_rows_contract(changed)
+        except RuntimeError:
+            pass
+        else:
+            raise RuntimeError(f"{change} zero-row theorem contract accepted")
     proof_path = ROOT / "src/Hologram/InferenceProofs.lex.tex"
     if proof_path.is_symlink() or not proof_path.is_file():
         raise RuntimeError("arithmetic proofs must be a regular source file")
@@ -146,6 +247,26 @@ def main():
         proofs = handle.read(4194305)
     if len(proofs) > 4194304:
         raise RuntimeError("arithmetic proofs exceed the compiler source limit")
+    proof_text = proofs.decode("utf-8")
+    core_line = next(line for line in proof_text.splitlines() if line.startswith("\\coredata{"))
+    core = json.loads(core_line[len("\\coredata{"):-1])
+    require_zero_proof_contract(core)
+    for change in ("omitted", "weakened", "policy"):
+        changed = json.loads(json.dumps(core))
+        if change == "omitted":
+            changed["declarations"].pop()
+        elif change == "weakened":
+            # Remove a quantified argument from the actual source statement.
+            declaration = changed["declarations"][1]
+            declaration["type"] = changed["nodes"][declaration["type"]]["v"]
+        else:
+            changed["declarations"][1]["policy"] = {"kind": "allow", "axioms": ["Quot.sound", "propext"]}
+        try:
+            require_zero_proof_contract(changed)
+        except RuntimeError:
+            pass
+        else:
+            raise RuntimeError(f"{change} theorem contract was accepted")
     values = (0, 1, 2, (1 << 32) - 1, 1 << 32, 1 << 63, UINT64_MAX)
     cases = list(itertools.product(values, repeat=3))
     cases.extend(((1, 1, UINT64_MAX // 2), (1, 1, UINT64_MAX // 2 + 1), (1 << 63, 0, 10)))
@@ -246,8 +367,6 @@ child_timeout_ms = 300000
         # Change only a general theorem's conclusion (zero -> one), keeping
         # its actual model, input dimensions and kernel proof unchanged.
         checks.write_text(header + payload + footer, encoding="utf-8")
-        proof_text = proofs.decode("utf-8")
-        core_line = next(line for line in proof_text.splitlines() if line.startswith("\\coredata{"))
         core = json.loads(core_line[len("\\coredata{"):-1])
         nodes = core["nodes"]
         def append(node):
@@ -271,14 +390,15 @@ child_timeout_ms = 300000
             proof_text.replace(core_line, mutated), encoding="utf-8")
         proof_rejected = run("lexlean", arguments, workspace, check=False)
         proof_rejection = json.loads(proof_rejected.stdout)
-        diagnostic, = proof_rejection["diagnostics"]
-        if (proof_rejected.returncode != 1 or proof_rejection["success"] is not False
-                or diagnostic["code"] != "LLV7002"
-                or diagnostic["primary"]["path"] != "src/Hologram/InferenceProofs.lex.tex"
-                or f"native core declaration '{declaration['name']}'" not in diagnostic["message"]
-                or "(kernel)" not in diagnostic["message"]):
+        if proof_rejected.returncode != 1 or not is_false_general_rejection(proof_rejection):
             print(proof_rejected.stdout, file=sys.stderr)
             raise RuntimeError("kernel did not reject the intended false general theorem")
+        for message in ("(kernel) unrelated type error", proof_rejection["diagnostics"][0]["message"].replace(
+                "Except.ok (UInt64.ofNat 1)", "Except.ok (UInt64.ofNat 2)")):
+            unrelated = json.loads(json.dumps(proof_rejection))
+            unrelated["diagnostics"][0]["message"] = message
+            if is_false_general_rejection(unrelated):
+                raise RuntimeError("unrelated kernel rejection accepted")
         report = {"schema": "hologram/inference-arithmetic-regression/1",
                           "source_sha256": hashlib.sha256(source).hexdigest(),
                           "proof_source_sha256": hashlib.sha256(proofs).hexdigest(),
@@ -288,6 +408,7 @@ child_timeout_ms = 300000
                           "false_equation_rejected": True,
                           "false_prefix_clamping_rejected": True,
                           "false_general_zero_theorem_rejected": True,
+                          "proof_inventory_mutations_rejected": 5,
                           "verification": verification,
                           "scope": "LexLean matrix and prefix boundary equations; general zero-factor proofs",
                           "product_acceptance": "not-established"}
