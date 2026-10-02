@@ -130,9 +130,10 @@ def require_general_arithmetic_contract(core):
     namespace = "PrismHologram.Hologram.Inference."
     prefix = "PrismHologram.Hologram.InferenceProofs.matmulFlops_zero_"
     prefix_name = "PrismHologram.Hologram.InferenceProofs.kvEffectiveTokens_full_prefix"
-    expected_names = {prefix + "inner", prefix + "columns", prefix_name}
+    excess_name = "PrismHologram.Hologram.InferenceProofs.kvEffectiveTokens_excess_prefix"
+    expected_names = {prefix + "inner", prefix + "columns", prefix_name, excess_name}
     declarations = core["declarations"]
-    if len(declarations) != 3 or {row["name"] for row in declarations} != expected_names:
+    if len(declarations) != 4 or {row["name"] for row in declarations} != expected_names:
         raise RuntimeError("general arithmetic theorem inventory changed")
     zero_level = {"k": "z"}
     one_level = {"k": "s", "a": zero_level}
@@ -164,7 +165,7 @@ def require_general_arithmetic_contract(core):
                      apply(constant(namespace + "matmulFlops"), matrix), success)
         expected = {"k": "p", "n": "m", "b": "e", "t": uint, "v": {
             "k": "p", "n": "k" if columns else "n", "b": "e", "t": uint, "v": goal}}
-        if declaration["name"] == prefix_name:
+        if declaration["name"] in (prefix_name, excess_name):
             prefix_error = constant(namespace + "KVPrefixError")
             prefix_result = apply(constant("Except", (zero_level, zero_level)), prefix_error, uint)
             prefix_success = apply(constant("Except.ok", (zero_level, zero_level)), prefix_error, uint, zero)
@@ -172,6 +173,18 @@ def require_general_arithmetic_contract(core):
             prefix_goal = apply(constant("Eq", (one_level,)), prefix_result,
                                 apply(constant(namespace + "kvEffectiveTokens"), total, total), prefix_success)
             expected = {"k": "p", "n": "total", "b": "e", "t": uint, "v": prefix_goal}
+            if declaration["name"] == excess_name:
+                total, cached = {"k": "b", "i": 2}, {"k": "b", "i": 1}
+                error_payload = apply(constant(namespace + "KVPrefixError.exceedsTotal"), total, cached)
+                failure = apply(constant("Except.error", (zero_level, zero_level)), prefix_error, uint, error_payload)
+                excess_goal = apply(constant("Eq", (one_level,)), prefix_result,
+                                    apply(constant(namespace + "kvEffectiveTokens"), total, cached), failure)
+                relation = apply(constant("Nat.lt"),
+                                 apply(constant("UInt64.toNat"), {"k": "b", "i": 1}),
+                                 apply(constant("UInt64.toNat"), {"k": "b", "i": 0}))
+                expected = {"k": "p", "n": "total", "b": "e", "t": uint, "v": {
+                    "k": "p", "n": "prefix", "b": "e", "t": uint, "v": {
+                        "k": "p", "n": "exceeds", "b": "e", "t": relation, "v": excess_goal}}}
         if (declaration["kind"] != "theorem" or declaration["levels"] != []
                 or declaration["policy"] != {"kind": "exact", "axioms": ["Quot.sound", "propext"]}
                 or declaration.get("generated", False) is not False
@@ -229,6 +242,26 @@ def is_false_full_prefix_rejection(result):
     return is_kernel_rejection(result, expected)
 
 
+def is_false_excess_prefix_rejection(result):
+    expected = """Lean rejected `PrismHologram.Hologram.InferenceProofs` (error): native core declaration 'PrismHologram.Hologram.InferenceProofs.kvEffectiveTokens_excess_prefix':
+  (kernel) declaration type mismatch, 'PrismHologram.Hologram.InferenceProofs.kvEffectiveTokens_excess_prefix' has type
+    ∀ (_ __1 : UInt64),
+      _.toNat.lt __1.toNat →
+        (fun __3 =>
+              Option.rec (Except.error (PrismHologram.Hologram.Inference.KVPrefixError.exceedsTotal _ __1))
+                (fun _ => Except.ok _) __3)
+            (PrismHologram.Hologram.Inference.LexLeanRuntime.checkedFromInt
+              ((Int.ofNat _.toNat).sub (Int.ofNat __1.toNat))) =
+          (fun __3 =>
+              Option.rec (Except.error (PrismHologram.Hologram.Inference.KVPrefixError.exceedsTotal _ __1))
+                (fun _ => Except.ok _) __3)
+            none
+  but it is expected to have type
+    ∀ (_ __1 : UInt64),
+      _.toNat.lt __1.toNat → PrismHologram.Hologram.Inference.kvEffectiveTokens _ __1 = Except.ok (UInt64.ofNat 0)"""
+    return is_kernel_rejection(result, expected)
+
+
 def is_kernel_rejection(result, expected):
     diagnostics = result.get("diagnostics", [])
     return (result.get("spec") == "lexlean/command-result/1" and result.get("command") == "verify"
@@ -281,13 +314,16 @@ def main():
     core_line = next(line for line in proof_text.splitlines() if line.startswith("\\coredata{"))
     core = json.loads(core_line[len("\\coredata{"):-1])
     require_general_arithmetic_contract(core)
-    for change in ("omitted-inner", "omitted-columns", "omitted-prefix", "weakened", "weakened-prefix", "policy"):
+    for change in ("omitted-inner", "omitted-columns", "omitted-prefix", "omitted-excess",
+                   "weakened", "weakened-prefix", "weakened-excess", "policy"):
         changed = json.loads(json.dumps(core))
         if change.startswith("omitted-"):
-            changed["declarations"].pop({"omitted-inner": 0, "omitted-columns": 1, "omitted-prefix": 2}[change])
+            changed["declarations"].pop({"omitted-inner": 0, "omitted-columns": 1,
+                                         "omitted-prefix": 2, "omitted-excess": 3}[change])
         elif change.startswith("weakened"):
             # Remove a quantified argument from the actual source statement.
-            declaration = changed["declarations"][2 if change == "weakened-prefix" else 1]
+            declaration = changed["declarations"][{"weakened": 1, "weakened-prefix": 2,
+                                                   "weakened-excess": 3}[change]]
             declaration["type"] = changed["nodes"][declaration["type"]]["v"]
         else:
             changed["declarations"][1]["policy"] = {"kind": "allow", "axioms": ["Quot.sound", "propext"]}
@@ -455,6 +491,44 @@ child_timeout_ms = 300000
             unrelated["diagnostics"][0]["message"] = message
             if is_false_full_prefix_rejection(unrelated):
                 raise RuntimeError("unrelated full-prefix kernel rejection accepted")
+        core = json.loads(core_line[len("\\coredata{"):-1])
+        nodes = core["nodes"]
+        declaration = core["declarations"][3]
+        binders = []
+        index = declaration["type"]
+        for _ in range(3):
+            binder = dict(nodes[index])
+            binders.append(binder)
+            index = binder["v"]
+        goal = dict(nodes[index])
+        def constant_index(name):
+            return next(index for index, node in enumerate(nodes) if node.get("k") == "c" and node["n"] == name)
+        def app(function, argument):
+            return append({"k": "a", "f": function, "x": argument})
+        zero = app(constant_index("UInt64.ofNat"), append({"k": "n", "v": "0"}))
+        success = app(app(app(constant_index("Except.ok"),
+                             constant_index("PrismHologram.Hologram.Inference.KVPrefixError")),
+                         constant_index("UInt64")), zero)
+        goal["x"] = success
+        index = append(goal)
+        for binder in reversed(binders):
+            binder["v"] = index
+            index = append(binder)
+        declaration["type"] = index
+        mutated = "\\coredata{" + json.dumps(core, sort_keys=True, separators=(",", ":")) + "}"
+        (workspace / "src/Hologram/InferenceProofs.lex.tex").write_text(
+            proof_text.replace(core_line, mutated), encoding="utf-8")
+        excess_rejected = run("lexlean", arguments, workspace, check=False)
+        excess_rejection = json.loads(excess_rejected.stdout)
+        if excess_rejected.returncode != 1 or not is_false_excess_prefix_rejection(excess_rejection):
+            print(excess_rejected.stdout, file=sys.stderr)
+            raise RuntimeError("kernel did not reject general invalid-prefix clamping")
+        for message in ("(kernel) unrelated type error", excess_rejection["diagnostics"][0]["message"].replace(
+                "Except.ok (UInt64.ofNat 0)", "Except.ok (UInt64.ofNat 1)")):
+            unrelated = json.loads(json.dumps(excess_rejection))
+            unrelated["diagnostics"][0]["message"] = message
+            if is_false_excess_prefix_rejection(unrelated):
+                raise RuntimeError("unrelated excess-prefix kernel rejection accepted")
         report = {"schema": "hologram/inference-arithmetic-regression/1",
                           "source_sha256": hashlib.sha256(source).hexdigest(),
                           "proof_source_sha256": hashlib.sha256(proofs).hexdigest(),
@@ -465,9 +539,10 @@ child_timeout_ms = 300000
                           "false_prefix_clamping_rejected": True,
                           "false_general_zero_theorem_rejected": True,
                           "false_general_full_prefix_rejected": True,
-                          "proof_inventory_mutations_rejected": 8,
+                          "false_general_excess_clamping_rejected": True,
+                          "proof_inventory_mutations_rejected": 10,
                           "verification": verification,
-                          "scope": "LexLean matrix and prefix boundary equations; general zero-factor and full-prefix proofs",
+                          "scope": "LexLean matrix and prefix boundary equations; general zero-factor, full-prefix and excess-prefix proofs",
                           "product_acceptance": "not-established"}
         if options.evidence_directory is not None:
             (options.evidence_directory / "false-equation-result.json").write_text(
@@ -478,6 +553,8 @@ child_timeout_ms = 300000
                 json.dumps(proof_rejection, sort_keys=True) + "\n", encoding="utf-8")
             (options.evidence_directory / "false-general-prefix-proof-result.json").write_text(
                 json.dumps(prefix_proof_rejection, sort_keys=True) + "\n", encoding="utf-8")
+            (options.evidence_directory / "false-general-excess-proof-result.json").write_text(
+                json.dumps(excess_rejection, sort_keys=True) + "\n", encoding="utf-8")
             (options.evidence_directory / "regression-result.json").write_text(
                 json.dumps(report, sort_keys=True) + "\n", encoding="utf-8")
         print(json.dumps(report, sort_keys=True))
