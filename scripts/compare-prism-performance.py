@@ -12,7 +12,7 @@ import argparse
 import hashlib
 import shutil
 
-from benchmark_process import MeasurementError, measure, run_json, report_run
+from benchmark_process import MeasurementError, measure, run_json, report_run, sample_evidence
 import sys
 import time
 from pathlib import Path
@@ -68,7 +68,7 @@ def benchmark_uor_cost_model() -> dict:
             "prefix_tokens": tc["prefix"],
             "effective_tokens": eff_tokens,
             "kv_cache_savings_pct": prefix_savings_pct,
-            "cli_sample": sample,
+            "cli_sample": sample_evidence(sample),
             "reported_is_optimal": data.get("is_optimal"),
         })
 
@@ -133,7 +133,7 @@ def benchmark_working_set_containment() -> dict:
             "--json",
         ]
         data, sample = run_json([str(BINARY_PATH)] + args)
-        results.append({"inputs": sc, "unvalidated_cost_model": data, "cli_sample": sample})
+        results.append({"inputs": sc, "unvalidated_cost_model": data, "cli_sample": sample_evidence(sample)})
 
     return {"scenarios": results}
 

@@ -11,7 +11,7 @@ import tempfile
 import time
 import unittest
 
-from benchmark_process import MeasurementError, measure, run_json, run_sample, report_run
+from benchmark_process import MeasurementError, measure, run_json, run_sample, report_run, sample_evidence
 
 
 class MeasurementTests(unittest.TestCase):
@@ -124,6 +124,16 @@ class MeasurementTests(unittest.TestCase):
                     self.assertNotIn("stderr", sample)
                     self.assertNotIn("error", sample)
                     self.assertEqual(sample["stdout_sha256"], hashlib.sha256((payload + "\n").encode()).hexdigest())
+
+    def test_successful_cli_sample_metadata_uses_same_output_boundary(self):
+        sample = run_sample(self.command("import sys; print('child output'); print('child error',file=sys.stderr)"))
+        result = sample_evidence(sample)
+        self.assertNotIn("stdout", result)
+        self.assertNotIn("stderr", result)
+        self.assertEqual(result["stdout_sha256"], hashlib.sha256(b"child output\n").hexdigest())
+        self.assertEqual(result["stderr_sha256"], hashlib.sha256(b"child error\n").hexdigest())
+        self.assertEqual(result["returncode"], 0)
+        self.assertIn("stdout", sample, "the caller retains its original observation")
 
     def test_interruptions_replace_old_success_and_preserve_exception_and_invocations(self):
         with tempfile.TemporaryDirectory() as directory:

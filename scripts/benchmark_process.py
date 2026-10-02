@@ -220,6 +220,12 @@ def run_sample(command, timeout=30):
     return sample
 
 
+def sample_evidence(sample):
+    """Output metadata only; command arguments remain explicit, non-secret inputs."""
+    return {key: value for key, value in sample.items()
+            if key not in ("stdout", "stderr", "error")}
+
+
 def measure(command, iterations=25, timeout=30):
     if type(iterations) is not int or iterations <= 0:
         raise ValueError("iterations must be a positive integer")
@@ -247,8 +253,7 @@ def measure(command, iterations=25, timeout=30):
         "throughput_ops_sec": 1000 / mean,
         "measurement_scope": "single CLI process spawn-to-exit; not in-process dispatch or inference",
         "rss_scope": "OS child high-water mark per isolated invocation; not simultaneous process-tree total",
-        "samples": [{key: value for key, value in sample.items()
-                     if key not in ("stdout", "stderr")} for sample in samples],
+        "samples": [sample_evidence(sample) for sample in samples],
     }
 
 
@@ -295,14 +300,8 @@ def report_run(path, collect):
     """Retain failure evidence; completion of diagnostics is not product acceptance."""
     base = {"acceptance": "not-established", "started_at_unix": time.time()}
     journal = []
-    def evidence(sample):
-        # Exceptions may repeat raw child stderr in their message or sample.
-        # Apply the same output boundary to every persisted failure path.
-        # Command arguments remain explicit measurement inputs, not secrets.
-        return {key: value for key, value in sample.items()
-                if key not in ("stdout", "stderr", "error")}
     def record(sample):
-        entry = evidence(sample)
+        entry = sample_evidence(sample)
         # Preserve the worker's original-byte digests, counts and completeness
         # metadata without publishing potentially sensitive decoded CLI text.
         journal.append(entry)
@@ -316,7 +315,7 @@ def report_run(path, collect):
     except BaseException as error:
         status = "interrupted" if isinstance(error, (KeyboardInterrupt, SystemExit, GeneratorExit)) else "failed"
         write_report(path, {**base, "status": status, "error_type": type(error).__name__,
-                            "samples": [evidence(sample) for sample in getattr(error, "samples", [])],
+                            "samples": [sample_evidence(sample) for sample in getattr(error, "samples", [])],
                             "invocations": journal})
         raise
     finally:
