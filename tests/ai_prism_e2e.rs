@@ -898,9 +898,11 @@ mod tier2_boundary_and_corner_cases {
         let evidence: Value = serde_json::from_slice(&fs::read(report).unwrap()).unwrap();
         assert_eq!(evidence["status"], "failed");
         assert_eq!(evidence["acceptance"], "not-established");
-        assert!(evidence["error"]
-            .as_str()
-            .unwrap()
+        assert_eq!(evidence["error_type"], "MeasurementError");
+        assert!(evidence.get("error").is_none());
+        assert!(evidence.get("diagnostics").is_none());
+        assert!(String::from_utf8(output.stderr)
+            .expect("UTF-8 benchmark diagnostic")
             .contains("required projection missing"));
     }
 
