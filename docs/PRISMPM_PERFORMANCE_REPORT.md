@@ -13,6 +13,12 @@ case coverage. The diagnostic scripts report `acceptance: not-established`; this
 correction does not complete that work. The text below is retained as the record
 of the withdrawn claims, not implementation guidance or acceptance evidence.
 
+Diagnostic reports retain output hashes, byte counts and cleanup outcomes, not
+raw child output or exception messages. Failures and handled interruptions replace
+prior success reports. Command arguments and structured results are retained;
+do not include credentials in them. Abrupt process death may leave `running`
+evidence, which must never be treated as completed verification.
+
 **Date:** 2026-09-30  
 **Repository:** `hologram-live` (Branch: `feat/prismpm-v0.3.0-sdk`, Version: `1.0.0`)  
 **Specification Standard:** ISO/IEC/IEEE 42010 Systems & Software Architecture  

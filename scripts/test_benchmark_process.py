@@ -3,6 +3,7 @@
 import json
 import importlib.util
 import hashlib
+import os
 from pathlib import Path
 import sys
 import subprocess
@@ -95,6 +96,76 @@ class MeasurementTests(unittest.TestCase):
             self.assertEqual([s["returncode"] for s in evidence["invocations"]], [0, 0, 0, 9])
             self.assertIn("stdout_sha256", evidence["invocations"][0])
             self.assertNotIn("stdout", evidence["invocations"][0])
+
+    def test_failed_reports_never_reintroduce_raw_output_through_exceptions(self):
+        with tempfile.TemporaryDirectory() as directory:
+            report = Path(directory) / "report.json"
+            secret = Path(directory) / "child-output"
+            payload = "private-child-output-must-not-enter-report"
+            secret.write_text(payload)
+            # The command contains only a path; its output is read by a real
+            # subprocess, not supplied to the recorder as synthetic success.
+            read = "from pathlib import Path; import sys; value=Path(" + repr(str(secret)) + ").read_text(); "
+            for code, collect in [
+                (read + "print(value); print(value,file=sys.stderr); exit(7)", measure),
+                (read + "print(value)", run_json),
+            ]:
+                with self.subTest(collector=collect.__name__), self.assertRaises(MeasurementError):
+                    report_run(report, lambda: collect(self.command(code)))
+                text = report.read_text()
+                self.assertNotIn(payload, text)
+                data = json.loads(text)
+                self.assertEqual(data["status"], "failed")
+                self.assertEqual(data["error_type"], "MeasurementError")
+                self.assertEqual(data["acceptance"], "not-established")
+                self.assertNotIn("diagnostics", data)
+                for sample in data["samples"] + data["invocations"]:
+                    self.assertNotIn("stdout", sample)
+                    self.assertNotIn("stderr", sample)
+                    self.assertNotIn("error", sample)
+                    self.assertEqual(sample["stdout_sha256"], hashlib.sha256((payload + "\n").encode()).hexdigest())
+
+    def test_interruptions_replace_old_success_and_preserve_exception_and_invocations(self):
+        with tempfile.TemporaryDirectory() as directory:
+            report = Path(directory) / "report.json"
+            for interruption in (KeyboardInterrupt("private diagnostic"), SystemExit(9), GeneratorExit()):
+                report.write_text('{"status":"completed","diagnostics":{"stale":true}}')
+                def collect():
+                    run_sample(self.command("print('completed before interruption')"))
+                    raise interruption
+                with self.subTest(kind=type(interruption).__name__), self.assertRaises(type(interruption)) as caught:
+                    report_run(report, collect)
+                self.assertIs(caught.exception, interruption)
+                text = report.read_text()
+                self.assertNotIn("private diagnostic", text)
+                data = json.loads(text)
+                self.assertEqual(data["status"], "interrupted")
+                self.assertEqual(data["error_type"], type(interruption).__name__)
+                self.assertEqual(len(data["invocations"]), 1)
+                self.assertNotIn("diagnostics", data)
+                previous = report.read_bytes()
+                run_sample(self.command("pass"))
+                self.assertEqual(report.read_bytes(), previous, "recorder context was restored")
+
+    def test_actual_sigint_reaps_active_measurement_and_records_interruption(self):
+        with tempfile.TemporaryDirectory() as directory:
+            report = Path(directory) / "report.json"
+            marker = Path(directory) / "child-pid"
+            code = ("import os,signal,time; from pathlib import Path; "
+                    f"Path({str(marker)!r}).write_text(str(os.getpid())); "
+                    f"os.kill({os.getpid()},signal.SIGINT); time.sleep(30)")
+            started = time.monotonic()
+            with self.assertRaises(KeyboardInterrupt):
+                report_run(report, lambda: run_sample(self.command(code), timeout=2))
+            self.assertLess(time.monotonic() - started, 4)
+            self.assertFalse(Path(f"/proc/{int(marker.read_text())}").exists())
+            data = json.loads(report.read_text())
+            self.assertEqual(data["status"], "interrupted")
+            self.assertEqual(data["error_type"], "KeyboardInterrupt")
+            self.assertEqual(len(data["invocations"]), 1)
+            self.assertEqual(data["invocations"][0]["status"], "interrupted")
+            self.assertTrue(data["invocations"][0]["cleanup_confirmed"])
+            self.assertNotIn("diagnostics", data)
 
     def command(self, source):
         return [sys.executable, "-c", source]

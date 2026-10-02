@@ -155,27 +155,49 @@ def _run_sample(command, timeout=30):
     previous = _subreaper(True)
     started = time.perf_counter()
     failure = None
+    worker = None
     try:
-        worker = subprocess.run(
+        worker = subprocess.Popen(
             [sys.executable, str(Path(__file__).resolve()), json.dumps(command), str(timeout)],
-            capture_output=True, text=True, timeout=timeout + 5,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
         )
+        worker_stdout, worker_stderr = worker.communicate(timeout=timeout + 5)
     except (subprocess.TimeoutExpired, KeyboardInterrupt, OSError) as error:
         failure = error
     finally:
+        # Keep the Popen handle until its worker is reaped. subprocess.run's
+        # interrupted context can otherwise discard it while it is still live.
+        if worker is not None and worker.poll() is None:
+            worker.kill()
+            try:
+                worker.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                # The bounded owned-descendant cleanup below determines whether
+                # termination is confirmed; this cannot turn failure into success.
+                pass
         clean, killed = _cleanup_children()
+        if worker is not None:
+            worker.poll()
+            worker.stdout.close()
+            worker.stderr.close()
         _subreaper(previous)
     if failure is not None or not clean or killed:
         sample = {"command": command, "status": "worker-failed" if clean else "cleanup-failed",
                   "elapsed_ms": (time.perf_counter() - started) * 1000,
                   "cleanup_confirmed": clean, "error": str(failure), "returncode": None}
+        if isinstance(failure, KeyboardInterrupt):
+            if clean:
+                sample["status"] = "interrupted"
+            failure.sample = sample
+            failure.samples = [sample]
+            raise failure
         raise MeasurementError("worker execution failed; no successful sample", sample) from failure
     if worker.returncode:
         sample = {"command": command, "status": "worker-failed", "returncode": worker.returncode,
-                  "cleanup_confirmed": clean, "stderr": worker.stderr[:1024]}
-        raise MeasurementError("measurement worker failed: " + worker.stderr[:1024], sample)
+                  "cleanup_confirmed": clean, "stderr": worker_stderr[:1024]}
+        raise MeasurementError("measurement worker failed: " + worker_stderr[:1024], sample)
     try:
-        sample = json.loads(worker.stdout)
+        sample = json.loads(worker_stdout)
     except (ValueError, TypeError) as error:
         raise MeasurementError("measurement worker returned invalid JSON") from error
     if sample["status"] != "completed" or sample["returncode"] != 0:
@@ -188,8 +210,8 @@ def _run_sample(command, timeout=30):
 def run_sample(command, timeout=30):
     try:
         sample = _run_sample(command, timeout)
-    except MeasurementError as error:
-        sample = error.sample or {"command": command, "status": "failed", "error": str(error)}
+    except (MeasurementError, KeyboardInterrupt) as error:
+        sample = getattr(error, "sample", None) or {"command": command, "status": "failed", "error": str(error)}
         if _RECORDER.get() is not None:
             _RECORDER.get()(sample)
         raise
@@ -273,8 +295,14 @@ def report_run(path, collect):
     """Retain failure evidence; completion of diagnostics is not product acceptance."""
     base = {"acceptance": "not-established", "started_at_unix": time.time()}
     journal = []
+    def evidence(sample):
+        # Exceptions may repeat raw child stderr in their message or sample.
+        # Apply the same output boundary to every persisted failure path.
+        # Command arguments remain explicit measurement inputs, not secrets.
+        return {key: value for key, value in sample.items()
+                if key not in ("stdout", "stderr", "error")}
     def record(sample):
-        entry = {key: value for key, value in sample.items() if key not in ("stdout", "stderr")}
+        entry = evidence(sample)
         # Preserve the worker's original-byte digests, counts and completeness
         # metadata without publishing potentially sensitive decoded CLI text.
         journal.append(entry)
@@ -285,9 +313,11 @@ def report_run(path, collect):
         result = collect()
         write_report(path, {**base, "status": "completed", "diagnostics": result,
                             "invocations": journal})
-    except Exception as error:
-        write_report(path, {**base, "status": "failed", "error": str(error),
-                            "samples": getattr(error, "samples", []), "invocations": journal})
+    except BaseException as error:
+        status = "interrupted" if isinstance(error, (KeyboardInterrupt, SystemExit, GeneratorExit)) else "failed"
+        write_report(path, {**base, "status": status, "error_type": type(error).__name__,
+                            "samples": [evidence(sample) for sample in getattr(error, "samples", [])],
+                            "invocations": journal})
         raise
     finally:
         _RECORDER.reset(token)
