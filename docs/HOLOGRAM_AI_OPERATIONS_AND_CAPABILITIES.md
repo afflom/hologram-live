@@ -58,8 +58,13 @@ returns success with zero; nonzero products exceeding `UInt64` return `overflow`
 `matmulFlops_zero_inner` and `matmulFlops_zero_columns` prove each zero-factor
 case for arbitrary remaining dimensions. The latter two are LexLean core-module
 proofs checked against the actual imported UInt64 model; no handwritten Lean is
-used. The boundary corpus remains finite, not a general overflow theorem or
-generated-runtime acceptance.
+used. The checked-conversion and multiplication proofs compose into
+`guardedMatmulFlops_bounded` (explicit intermediate bounds) and
+`guardedMatmulFlops_overflow` (final mathematical product at least `2^64`).
+The overflow proof covers failure at any multiplication stage. Both concern
+the actual guarded helper with its zero flag set to false; they do not yet
+prove the canonical entry point's complete zero-guard composition or establish
+generated-runtime acceptance. The boundary corpus is supplementary finite evidence.
 
 ### 2.2 Formal Prefix KV-Cache Elision
 The LexLean model returns `Result UInt64 KVPrefixError`: valid bounds return
