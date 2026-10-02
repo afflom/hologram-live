@@ -1,0 +1,77 @@
+name: Inference model arithmetic
+
+on:
+  push:
+    branches: [main, prismpm-hologram-live]
+    tags: ['**']
+    paths:
+      - src/Hologram/Inference.lex.tex
+      - src/Hologram/InferenceProofs.lex.tex
+      - src/Hologram.lex.tex
+      - scripts/verify-inference-arithmetic.py
+      - prismpm.lock
+      - .github/workflows/inference-arithmetic.yml
+  pull_request:
+    paths:
+      - src/Hologram/Inference.lex.tex
+      - src/Hologram/InferenceProofs.lex.tex
+      - src/Hologram.lex.tex
+      - scripts/verify-inference-arithmetic.py
+      - prismpm.lock
+      - .github/workflows/inference-arithmetic.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: inference-arithmetic-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  SDK: ghcr.io/uor-foundation/prismpm-sdk-candidate@sha256:60226bc791d4c0e5613402a6be7e63f4963d3faf7f327befcf56fc0e41d0ce21
+  CAPTURE_NAME: h19-matrix-${{ github.run_id }}-${{ github.run_attempt }}
+
+jobs:
+  arithmetic:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Check immutable compiler selection and acquisition reserve
+        run: |
+          set -euo pipefail
+          python3 -I -c 'import json,os; from pathlib import Path; assert json.loads(Path("prismpm.lock").read_text())["sdk_image"] == os.environ["SDK"]'
+          test "$(df --output=avail -B1 . | tail -1)" -ge 42949672960
+          docker pull "$SDK"
+      - name: Verify actual model equations and reject a false equation
+        run: |
+          set -euo pipefail
+          mkdir "$RUNNER_TEMP/h19-evidence"
+          docker run --rm --name "$CAPTURE_NAME" --pull=never --network none --read-only \
+            --memory 2g --memory-swap 2g --cpus 2 --pids-limit 128 \
+            --user "$(id -u):$(id -g)" \
+            --tmpfs "/tmp:rw,exec,nosuid,nodev,uid=$(id -u),gid=$(id -g),size=512m" \
+            --mount "type=bind,src=$GITHUB_WORKSPACE,dst=/workspace,readonly" \
+            --mount "type=bind,src=$RUNNER_TEMP/h19-evidence,dst=/evidence" \
+            --workdir /workspace --entrypoint python3 "$SDK" -I \
+            scripts/verify-inference-arithmetic.py --evidence-directory /evidence/verified \
+            | tee "$RUNNER_TEMP/h19-evidence/result.json"
+      - name: Confirm the exact test container is absent
+        if: always()
+        run: |
+          set -euo pipefail
+          remaining=$(docker container ls --all --quiet --filter "name=^/$CAPTURE_NAME$")
+          if [ -n "$remaining" ]; then docker rm --force --volumes "$CAPTURE_NAME"; fi
+          test -z "$(docker container ls --all --quiet --filter "name=^/$CAPTURE_NAME$")"
+      - name: Retain model-only verification evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: h19-model-arithmetic-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/h19-evidence/
+          include-hidden-files: true
+          if-no-files-found: warn
+          retention-days: 14
