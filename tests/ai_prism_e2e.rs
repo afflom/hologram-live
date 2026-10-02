@@ -476,7 +476,8 @@ mod tier1_feature_coverage {
         if p.exists() {
             let data = fs::read_to_string(p).expect("Read JSON");
             let val: Value = serde_json::from_str(&data).expect("Valid JSON");
-            assert!(val.get("cli_benchmarks").is_some() || val.get("timestamp").is_some());
+            assert_eq!(val["acceptance"], "not-established");
+            assert!(val["status"] == "completed" || val["status"] == "failed");
         }
     }
 
@@ -486,7 +487,15 @@ mod tier1_feature_coverage {
         if p.exists() {
             let data = fs::read_to_string(p).expect("Read JSON");
             let val: Value = serde_json::from_str(&data).expect("Valid JSON");
-            assert!(val.is_array() && val.as_array().is_some_and(|a| !a.is_empty()));
+            assert_eq!(val["acceptance"], "not-established");
+            if val["status"] == "completed" {
+                assert_eq!(val["diagnostics"]["expected_cases"], 22);
+                assert_eq!(val["diagnostics"]["executed_cases"], 22);
+                assert_eq!(val["diagnostics"]["cases"].as_array().unwrap().len(), 22);
+            } else {
+                assert_eq!(val["status"], "failed");
+                assert!(val["error"].is_string());
+            }
         }
     }
 
@@ -496,9 +505,8 @@ mod tier1_feature_coverage {
         if p.exists() {
             let data = fs::read_to_string(p).expect("Read JSON");
             let val: Value = serde_json::from_str(&data).expect("Valid JSON");
-            if let Some(inf) = val.get("inference_cost_model") {
-                assert_eq!(inf["dram_traffic_reduction_pct"], 75.0);
-            }
+            assert_eq!(val["acceptance"], "not-established");
+            assert!(val["diagnostics"].get("inference_cost_model").is_none());
         }
     }
 
@@ -876,12 +884,26 @@ mod tier2_boundary_and_corner_cases {
 
     #[test]
     fn test_tier2_f8_02_benchmark_exit_code() {
+        let directory = tempfile::tempdir().expect("temporary benchmark directory");
+        let report = directory.path().join("report.json");
         let output = Command::new("python3")
             .arg("scripts/compare-prism-performance.py")
-            .output();
-        if let Ok(out) = output {
-            assert!(out.status.success());
-        }
+            .arg("--build-dir")
+            .arg(directory.path())
+            .arg("--output")
+            .arg(&report)
+            .output()
+            .expect("Python is required for benchmark diagnostics");
+        assert_eq!(output.status.code(), Some(1));
+        let evidence: Value = serde_json::from_slice(&fs::read(report).unwrap()).unwrap();
+        assert_eq!(evidence["status"], "failed");
+        assert_eq!(evidence["acceptance"], "not-established");
+        assert_eq!(evidence["error_type"], "MeasurementError");
+        assert!(evidence.get("error").is_none());
+        assert!(evidence.get("diagnostics").is_none());
+        assert!(String::from_utf8(output.stderr)
+            .expect("UTF-8 benchmark diagnostic")
+            .contains("required projection missing"));
     }
 
     #[test]
@@ -890,10 +912,15 @@ mod tier2_boundary_and_corner_cases {
         if p.exists() {
             let data = fs::read_to_string(p).expect("Read JSON");
             let val: Value = serde_json::from_str(&data).expect("Valid JSON");
-            if let Some(benches) = val.get("cli_benchmarks").and_then(|v| v.as_object()) {
+            if let Some(benches) = val["diagnostics"]
+                .get("cli_benchmarks")
+                .and_then(|v| v.as_object())
+            {
                 for (_cmd, entry) in benches {
-                    let rss = entry["prism_rss_mb"].as_f64().unwrap_or(1.0);
-                    assert!(rss > 0.0);
+                    if !entry["prism_rss_mb"].is_null() {
+                        let rss = entry["prism_rss_mb"].as_f64().expect("numeric RSS");
+                        assert!(rss > 0.0);
+                    }
                 }
             }
         }
@@ -905,9 +932,14 @@ mod tier2_boundary_and_corner_cases {
         if p.exists() {
             let data = fs::read_to_string(p).expect("Read JSON");
             let val: Value = serde_json::from_str(&data).expect("Valid JSON");
-            if let Some(benches) = val.get("cli_benchmarks").and_then(|v| v.as_object()) {
+            if let Some(benches) = val["diagnostics"]
+                .get("cli_benchmarks")
+                .and_then(|v| v.as_object())
+            {
                 for (_cmd, entry) in benches {
-                    let speedup = entry["speedup"].as_f64().unwrap_or(1.0);
+                    let speedup = entry["speedup"]
+                        .as_f64()
+                        .expect("numeric elapsed-time ratio");
                     assert!(speedup.is_finite());
                 }
             }

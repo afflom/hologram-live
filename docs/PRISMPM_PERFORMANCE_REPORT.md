@@ -1,4 +1,23 @@
-# PrismPM Performance Comparison Report: Hologram Live
+# Withdrawn performance report: Hologram Live
+
+The conclusions and numeric performance claims below are withdrawn. They do not
+establish production readiness, generated-runtime superiority, no-OOM behavior,
+zero allocation, full-context execution, fusion, or cluster convergence. Cost
+formulas and CLI startup timings are not inference measurements; parsing a
+Kubernetes document is not reconciliation. The cited hashes are not accepted
+attestations of those claims.
+
+[H20](https://github.com/afflom/hologram-live/issues/21) requires independently
+identified equivalent workloads, real outputs, hardware measurements and complete
+case coverage. The diagnostic scripts report `acceptance: not-established`; this
+correction does not complete that work. The text below is retained as the record
+of the withdrawn claims, not implementation guidance or acceptance evidence.
+
+Diagnostic reports retain output hashes, byte counts and cleanup outcomes, not
+raw child output or exception messages. Failures and handled interruptions replace
+prior success reports. Command arguments and structured results are retained;
+do not include credentials in them. Abrupt process death may leave `running`
+evidence, which must never be treated as completed verification.
 
 **Date:** 2026-09-30  
 **Repository:** `hologram-live` (Branch: `feat/prismpm-v0.3.0-sdk`, Version: `1.0.0`)  

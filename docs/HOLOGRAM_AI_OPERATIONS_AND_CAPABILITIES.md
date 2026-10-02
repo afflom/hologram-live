@@ -1,4 +1,17 @@
-# Hologram-AI Operations & Capabilities Architecture Report: PrismPM Declarative Modeling vs. Non-PrismPM Imperative Architecture
+# Withdrawn AI operations and capabilities report
+
+All runtime, performance, resource-safety and architectural-superiority claims in
+the historical text below are withdrawn. The modeled arithmetic does not prove
+actual prefix reuse, fused tensor execution, zero allocation, absence of OOM or
+swap, or full-context operation. The fixed dispatch and DRAM values are not
+empirical measurements. General claims about other inference architectures are
+not supported by an equivalent-work comparison.
+
+[H20](https://github.com/afflom/hologram-live/issues/21), together with H15–H19,
+requires implementation and real backend/output verification. Neither this
+correction nor the diagnostic scripts establishes completion. The remainder is
+retained only as a record of the withdrawn claims, not an accepted specification
+or performance result.
 
 **Date:** 2026-09-30  
 **Repository:** `hologram-live` (Branch: `feat/prismpm-v0.3.0-sdk`)  
