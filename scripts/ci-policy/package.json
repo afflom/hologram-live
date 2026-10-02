@@ -1,0 +1,7 @@
+{
+  "name": "hologram-ci-policy-tests",
+  "private": true,
+  "version": "0.0.0",
+  "scripts": { "test": "node --test policy.test.cjs" },
+  "dependencies": { "js-yaml": "4.3.2" }
+}

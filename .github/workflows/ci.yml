@@ -21,6 +21,16 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22.23.2'
+          cache: npm
+          cache-dependency-path: scripts/ci-policy/package-lock.json
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+        working-directory: scripts/ci-policy
+      - run: npm test
+        working-directory: scripts/ci-policy
+
       - uses: dtolnay/rust-toolchain@1.97.1
         with:
           components: rustfmt,clippy
