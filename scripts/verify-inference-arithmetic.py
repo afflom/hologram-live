@@ -138,10 +138,11 @@ def require_general_arithmetic_contract(core):
     multiply_overflow = "PrismHologram.Hologram.InferenceProofs.checkedMultiply_overflow"
     step_bounded = "PrismHologram.Hologram.InferenceProofs.multiplyStep_bounded"
     step_overflow = "PrismHologram.Hologram.InferenceProofs.multiplyStep_overflow"
+    matrix_bounded = "PrismHologram.Hologram.InferenceProofs.guardedMatmulFlops_bounded"
     expected_names = {prefix + "inner", prefix + "columns", prefix_name, excess_name, bounded_name, valid_name,
-                      overflow_name, multiply_bounded, multiply_overflow, step_bounded, step_overflow}
+                      overflow_name, multiply_bounded, multiply_overflow, step_bounded, step_overflow, matrix_bounded}
     declarations = core["declarations"]
-    if len(declarations) != 11 or {row["name"] for row in declarations} != expected_names:
+    if len(declarations) != 12 or {row["name"] for row in declarations} != expected_names:
         raise RuntimeError("general arithmetic theorem inventory changed")
     zero_level = {"k": "z"}
     one_level = {"k": "s", "a": zero_level}
@@ -261,6 +262,27 @@ def require_general_arithmetic_contract(core):
                     "k": "p", "n": "accumulatorBound", "b": "e", "t": accumulator_bound, "v": {
                         "k": "p", "n": "bounded" if bounded else "overflow", "b": "e", "t": relation,
                         "v": apply(constant("Eq", (one_level,)), option, step, output)}}}}
+        if declaration["name"] == matrix_bounded:
+            size = {"k": "n", "v": "18446744073709551616"}
+            # These are explicit intermediate bounds for the guarded helper,
+            # not a claim about the canonical entry point or overflow paths.
+            def product(depth, factors):
+                value = {"k": "n", "v": "2"}
+                for offset in range(factors):
+                    value = apply(constant("Nat.mul"), value,
+                                  apply(constant("UInt64.toNat"), {"k": "b", "i": depth - 1 - offset}))
+                return value
+            matrix = apply(constant(namespace + "MatrixDimension.mk"),
+                           *({"k": "b", "i": index} for index in (5, 4, 3)))
+            exact = apply(constant("Except.ok", (zero_level, zero_level)), error, uint,
+                          apply(constant("UInt64.ofNat"), product(6, 3)))
+            expected = apply(constant("Eq", (one_level,)), result,
+                             apply(constant(namespace + "guardedMatmulFlops"), constant("Bool.false"), matrix), exact)
+            binders = [("m", uint), ("k", uint), ("n", uint)] + [
+                (name, apply(constant("Nat.lt"), product(3 + index, index + 1), size))
+                for index, name in enumerate(("firstBound", "secondBound", "bounded"))]
+            for name, parameter_type in reversed(binders):
+                expected = {"k": "p", "n": name, "b": "e", "t": parameter_type, "v": expected}
         if (declaration["kind"] != "theorem" or declaration["levels"] != []
                 or declaration["policy"] != {"kind": "exact", "axioms": ["Quot.sound", "propext"]}
                 or declaration.get("generated", False) is not False
@@ -340,6 +362,28 @@ def is_false_excess_prefix_rejection(result):
 
 def is_false_arithmetic_rejection(result, name):
     expected = {
+        "matrix-bounded": """Lean rejected `PrismHologram.Hologram.InferenceProofs` (error): native core declaration 'PrismHologram.Hologram.InferenceProofs.guardedMatmulFlops_bounded':
+  (kernel) declaration type mismatch, 'PrismHologram.Hologram.InferenceProofs.guardedMatmulFlops_bounded' has type
+    ∀ (_ __1 __2 : UInt64),
+      (Nat.mul 2 _.toNat).lt 18446744073709551616 →
+        ((Nat.mul 2 _.toNat).mul __1.toNat).lt 18446744073709551616 →
+          (((Nat.mul 2 _.toNat).mul __1.toNat).mul __2.toNat).lt 18446744073709551616 →
+            (fun _ =>
+                  _.elim (Except.error PrismHologram.Hologram.Inference.MatrixCostError.overflow) fun _ => Except.ok _)
+                (PrismHologram.Hologram.Inference.multiplyStep
+                  (PrismHologram.Hologram.Inference.multiplyStep
+                    (PrismHologram.Hologram.Inference.multiplyStep (some (UInt64.ofNat 2)) _) __1)
+                  __2) =
+              (fun _ =>
+                  _.elim (Except.error PrismHologram.Hologram.Inference.MatrixCostError.overflow) fun _ => Except.ok _)
+                (some (UInt64.ofNat (((Nat.mul 2 _.toNat).mul __1.toNat).mul __2.toNat)))
+  but it is expected to have type
+    ∀ (_ __1 __2 : UInt64),
+      (Nat.mul 2 _.toNat).lt 18446744073709551616 →
+        ((Nat.mul 2 _.toNat).mul __1.toNat).lt 18446744073709551616 →
+          (((Nat.mul 2 _.toNat).mul __1.toNat).mul __2.toNat).lt 18446744073709551616 →
+            PrismHologram.Hologram.Inference.guardedMatmulFlops false { m := _, k := __1, n := __2 } =
+              Except.ok (UInt64.ofNat 1)""",
         "bounded": """Lean rejected `PrismHologram.Hologram.InferenceProofs` (error): native core declaration 'PrismHologram.Hologram.InferenceProofs.checkedFromNat_bounded':
   (kernel) declaration type mismatch, 'PrismHologram.Hologram.InferenceProofs.checkedFromNat_bounded' has type
     ∀ (_ : Nat),
@@ -690,7 +734,7 @@ child_timeout_ms = 300000
         arithmetic_rejections = {}
         for name, declaration_index in (("bounded", 4), ("valid", 5), ("conversion-overflow", 6),
                                         ("multiply-bounded", 7), ("multiply-overflow", 8),
-                                        ("step-bounded", 9), ("step-overflow", 10)):
+                                        ("step-bounded", 9), ("step-overflow", 10), ("matrix-bounded", 11)):
             core = json.loads(core_line[len("\\coredata{"):-1])
             nodes = core["nodes"]
             declaration = core["declarations"][declaration_index]
@@ -740,10 +784,11 @@ child_timeout_ms = 300000
                           "false_valid_prefix_rejected": True,
                           "false_checked_multiplication_rejected": True,
                           "false_accumulator_step_rejected": True,
-                          "kernel_rejection_cases": 12,
+                          "false_guarded_matrix_composition_rejected": True,
+                          "kernel_rejection_cases": 13,
                           "proof_inventory_mutations_rejected": inventory_mutations,
                           "verification": verification,
-                          "scope": "LexLean boundary equations; general zero-factor, prefix, checked-multiplication and accumulator-step proofs",
+                          "scope": "LexLean boundary equations; general zero-factor, prefix, checked-multiplication, accumulator-step and bounded guarded-matrix composition proofs",
                           "product_acceptance": "not-established"}
         if options.evidence_directory is not None:
             (options.evidence_directory / "false-equation-result.json").write_text(
