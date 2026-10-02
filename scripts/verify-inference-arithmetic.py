@@ -136,10 +136,12 @@ def require_general_arithmetic_contract(core):
     overflow_name = "PrismHologram.Hologram.InferenceProofs.checkedFromNat_overflow"
     multiply_bounded = "PrismHologram.Hologram.InferenceProofs.checkedMultiply_bounded"
     multiply_overflow = "PrismHologram.Hologram.InferenceProofs.checkedMultiply_overflow"
+    step_bounded = "PrismHologram.Hologram.InferenceProofs.multiplyStep_bounded"
+    step_overflow = "PrismHologram.Hologram.InferenceProofs.multiplyStep_overflow"
     expected_names = {prefix + "inner", prefix + "columns", prefix_name, excess_name, bounded_name, valid_name,
-                      overflow_name, multiply_bounded, multiply_overflow}
+                      overflow_name, multiply_bounded, multiply_overflow, step_bounded, step_overflow}
     declarations = core["declarations"]
-    if len(declarations) != 9 or {row["name"] for row in declarations} != expected_names:
+    if len(declarations) != 11 or {row["name"] for row in declarations} != expected_names:
         raise RuntimeError("general arithmetic theorem inventory changed")
     zero_level = {"k": "z"}
     one_level = {"k": "s", "a": zero_level}
@@ -239,6 +241,26 @@ def require_general_arithmetic_contract(core):
                 "k": "p", "n": "right", "b": "e", "t": uint, "v": {
                     "k": "p", "n": "bounded" if bounded else "overflow", "b": "e", "t": relation,
                     "v": apply(constant("Eq", (one_level,)), option, checked, output)}}}
+        if declaration["name"] in (step_bounded, step_overflow):
+            bounded = declaration["name"] == step_bounded
+            natural = constant("Nat")
+            option = apply(constant("Option", (zero_level,)), uint)
+            size = {"k": "n", "v": "18446744073709551616"}
+            accumulator, factor = {"k": "b", "i": 3}, {"k": "b", "i": 2}
+            product = apply(constant("Nat.mul"), accumulator, apply(constant("UInt64.toNat"), factor))
+            input_product = apply(constant("Nat.mul"), {"k": "b", "i": 2},
+                                  apply(constant("UInt64.toNat"), {"k": "b", "i": 1}))
+            relation = apply(constant("Nat.lt"), input_product, size) if bounded else apply(constant("Nat.le"), size, input_product)
+            output = (apply(constant("Option.some", (zero_level,)), uint, apply(constant("UInt64.ofNat"), product))
+                      if bounded else apply(constant("Option.none", (zero_level,)), uint))
+            step = apply(constant(namespace + "multiplyStep"),
+                         apply(constant("Option.some", (zero_level,)), uint, apply(constant("UInt64.ofNat"), accumulator)), factor)
+            accumulator_bound = apply(constant("Nat.lt"), {"k": "b", "i": 1}, size)
+            expected = {"k": "p", "n": "accumulator", "b": "e", "t": natural, "v": {
+                "k": "p", "n": "factor", "b": "e", "t": uint, "v": {
+                    "k": "p", "n": "accumulatorBound", "b": "e", "t": accumulator_bound, "v": {
+                        "k": "p", "n": "bounded" if bounded else "overflow", "b": "e", "t": relation,
+                        "v": apply(constant("Eq", (one_level,)), option, step, output)}}}}
         if (declaration["kind"] != "theorem" or declaration["levels"] != []
                 or declaration["policy"] != {"kind": "exact", "axioms": ["Quot.sound", "propext"]}
                 or declaration.get("generated", False) is not False
@@ -362,6 +384,29 @@ def is_false_arithmetic_rejection(result, name):
     ∀ (_ __1 : UInt64),
       (_.toNat.mul __1.toNat).lt 18446744073709551616 →
         PrismHologram.Hologram.Inference.LexLeanRuntime.checkedMultiply _ __1 = some (UInt64.ofNat 1)""",
+        "step-bounded": """Lean rejected `PrismHologram.Hologram.InferenceProofs` (error): native core declaration 'PrismHologram.Hologram.InferenceProofs.multiplyStep_bounded':
+  (kernel) declaration type mismatch, 'PrismHologram.Hologram.InferenceProofs.multiplyStep_bounded' has type
+    ∀ (_ : Nat) (__1 : UInt64),
+      _.lt 18446744073709551616 →
+        (_.mul __1.toNat).lt 18446744073709551616 →
+          PrismHologram.Hologram.Inference.multiplyStep (some (UInt64.ofNat _)) __1 =
+            some (UInt64.ofNat (_.mul __1.toNat))
+  but it is expected to have type
+    ∀ (_ : Nat) (__1 : UInt64),
+      _.lt 18446744073709551616 →
+        (_.mul __1.toNat).lt 18446744073709551616 →
+          PrismHologram.Hologram.Inference.multiplyStep (some (UInt64.ofNat _)) __1 = some (UInt64.ofNat 1)""",
+        "step-overflow": """Lean rejected `PrismHologram.Hologram.InferenceProofs` (error): native core declaration 'PrismHologram.Hologram.InferenceProofs.multiplyStep_overflow':
+  (kernel) declaration type mismatch, 'PrismHologram.Hologram.InferenceProofs.multiplyStep_overflow' has type
+    ∀ (_ : Nat) (__1 : UInt64),
+      _.lt 18446744073709551616 →
+        Nat.le 18446744073709551616 (_.mul __1.toNat) →
+          PrismHologram.Hologram.Inference.multiplyStep (some (UInt64.ofNat _)) __1 = none
+  but it is expected to have type
+    ∀ (_ : Nat) (__1 : UInt64),
+      _.lt 18446744073709551616 →
+        Nat.le 18446744073709551616 (_.mul __1.toNat) →
+          PrismHologram.Hologram.Inference.multiplyStep (some (UInt64.ofNat _)) __1 = some (UInt64.ofNat 1)""",
         "multiply-overflow": """Lean rejected `PrismHologram.Hologram.InferenceProofs` (error): native core declaration 'PrismHologram.Hologram.InferenceProofs.checkedMultiply_overflow':
   (kernel) declaration type mismatch, 'PrismHologram.Hologram.InferenceProofs.checkedMultiply_overflow' has type
     ∀ (_ __1 : UInt64),
@@ -644,7 +689,8 @@ child_timeout_ms = 300000
                 raise RuntimeError("unrelated excess-prefix kernel rejection accepted")
         arithmetic_rejections = {}
         for name, declaration_index in (("bounded", 4), ("valid", 5), ("conversion-overflow", 6),
-                                        ("multiply-bounded", 7), ("multiply-overflow", 8)):
+                                        ("multiply-bounded", 7), ("multiply-overflow", 8),
+                                        ("step-bounded", 9), ("step-overflow", 10)):
             core = json.loads(core_line[len("\\coredata{"):-1])
             nodes = core["nodes"]
             declaration = core["declarations"][declaration_index]
@@ -657,7 +703,7 @@ child_timeout_ms = 300000
             goal = dict(nodes[index])
             success = dict(nodes[goal["x"]])
             success["x"] = app(constant_index("UInt64.ofNat"), append({"k": "n", "v": "1"}))
-            if name in ("conversion-overflow", "multiply-overflow"):
+            if name in ("conversion-overflow", "multiply-overflow", "step-overflow"):
                 success["f"] = app(constant_index("Option.some"), constant_index("UInt64"))
             goal["x"] = append(success)
             index = append(goal)
@@ -693,10 +739,11 @@ child_timeout_ms = 300000
                           "false_bounded_conversion_rejected": True,
                           "false_valid_prefix_rejected": True,
                           "false_checked_multiplication_rejected": True,
-                          "kernel_rejection_cases": 10,
+                          "false_accumulator_step_rejected": True,
+                          "kernel_rejection_cases": 12,
                           "proof_inventory_mutations_rejected": inventory_mutations,
                           "verification": verification,
-                          "scope": "LexLean matrix and prefix boundary equations; general zero-factor, prefix and checked-multiplication proofs",
+                          "scope": "LexLean boundary equations; general zero-factor, prefix, checked-multiplication and accumulator-step proofs",
                           "product_acceptance": "not-established"}
         if options.evidence_directory is not None:
             (options.evidence_directory / "false-equation-result.json").write_text(
