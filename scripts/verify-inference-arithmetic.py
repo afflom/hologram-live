@@ -141,11 +141,12 @@ def require_general_arithmetic_contract(core):
     matrix_bounded = "PrismHologram.Hologram.InferenceProofs.guardedMatmulFlops_bounded"
     matrix_overflow = "PrismHologram.Hologram.InferenceProofs.guardedMatmulFlops_overflow"
     canonical_overflow = "PrismHologram.Hologram.InferenceProofs.matmulFlops_overflow"
+    canonical_bounded = "PrismHologram.Hologram.InferenceProofs.matmulFlops_bounded"
     expected_names = {prefix + "inner", prefix + "columns", prefix_name, excess_name, bounded_name, valid_name,
                       overflow_name, multiply_bounded, multiply_overflow, step_bounded, step_overflow,
-                      matrix_bounded, matrix_overflow, canonical_overflow}
+                      matrix_bounded, matrix_overflow, canonical_overflow, canonical_bounded}
     declarations = core["declarations"]
-    if len(declarations) != 14 or {row["name"] for row in declarations} != expected_names:
+    if len(declarations) != 15 or {row["name"] for row in declarations} != expected_names:
         raise RuntimeError("general arithmetic theorem inventory changed")
     zero_level = {"k": "z"}
     one_level = {"k": "s", "a": zero_level}
@@ -265,11 +266,11 @@ def require_general_arithmetic_contract(core):
                     "k": "p", "n": "accumulatorBound", "b": "e", "t": accumulator_bound, "v": {
                         "k": "p", "n": "bounded" if bounded else "overflow", "b": "e", "t": relation,
                         "v": apply(constant("Eq", (one_level,)), option, step, output)}}}}
-        if declaration["name"] in (matrix_bounded, matrix_overflow, canonical_overflow):
+        if declaration["name"] in (matrix_bounded, matrix_overflow, canonical_overflow, canonical_bounded):
             size = {"k": "n", "v": "18446744073709551616"}
             # The success theorem retains explicit intermediate bounds; the
             # overflow theorem needs only the final mathematical lower bound.
-            # The canonical overflow theorem additionally discharges the zero guard.
+            # Canonical theorems discharge the zero guard and any intermediate bounds.
             def product(depth, factors):
                 value = {"k": "n", "v": "2"}
                 for offset in range(factors):
@@ -285,7 +286,7 @@ def require_general_arithmetic_contract(core):
             binders = [("m", uint), ("k", uint), ("n", uint)] + [
                 (name, apply(constant("Nat.lt"), product(3 + index, index + 1), size))
                 for index, name in enumerate(("firstBound", "secondBound", "bounded"))]
-            if declaration["name"] in (matrix_overflow, canonical_overflow):
+            if declaration["name"] in (matrix_overflow, canonical_overflow, canonical_bounded):
                 matrix = apply(constant(namespace + "MatrixDimension.mk"),
                                *({"k": "b", "i": index} for index in (3, 2, 1)))
                 failure = apply(constant("Except.error", (zero_level, zero_level)), error, uint,
@@ -297,6 +298,12 @@ def require_general_arithmetic_contract(core):
                                      apply(constant(namespace + "matmulFlops"), matrix), failure)
                 binders = [("m", uint), ("k", uint), ("n", uint),
                            ("overflow", apply(constant("Nat.le"), size, product(3, 3)))]
+                if declaration["name"] == canonical_bounded:
+                    exact = apply(constant("Except.ok", (zero_level, zero_level)), error, uint,
+                                  apply(constant("UInt64.ofNat"), product(4, 3)))
+                    expected = apply(constant("Eq", (one_level,)), result,
+                                     apply(constant(namespace + "matmulFlops"), matrix), exact)
+                    binders[-1] = ("bounded", apply(constant("Nat.lt"), product(3, 3), size))
             for name, parameter_type in reversed(binders):
                 expected = {"k": "p", "n": name, "b": "e", "t": parameter_type, "v": expected}
         if (declaration["kind"] != "theorem" or declaration["levels"] != []
@@ -378,6 +385,16 @@ def is_false_excess_prefix_rejection(result):
 
 def is_false_arithmetic_rejection(result, name):
     expected = {
+        "canonical-bounded": """Lean rejected `PrismHologram.Hologram.InferenceProofs` (error): native core declaration 'PrismHologram.Hologram.InferenceProofs.matmulFlops_bounded':
+  (kernel) declaration type mismatch, 'PrismHologram.Hologram.InferenceProofs.matmulFlops_bounded' has type
+    ∀ (_ __1 __2 : UInt64),
+      (((Nat.mul 2 _.toNat).mul __1.toNat).mul __2.toNat).lt 18446744073709551616 →
+        PrismHologram.Hologram.Inference.matmulFlops { m := _, k := __1, n := __2 } =
+          Except.ok (UInt64.ofNat (((Nat.mul 2 _.toNat).mul __1.toNat).mul __2.toNat))
+  but it is expected to have type
+    ∀ (_ __1 __2 : UInt64),
+      (((Nat.mul 2 _.toNat).mul __1.toNat).mul __2.toNat).lt 18446744073709551616 →
+        PrismHologram.Hologram.Inference.matmulFlops { m := _, k := __1, n := __2 } = Except.ok (UInt64.ofNat 1)""",
         "canonical-overflow": """Lean rejected `PrismHologram.Hologram.InferenceProofs` (error): native core declaration 'PrismHologram.Hologram.InferenceProofs.matmulFlops_overflow':
   (kernel) declaration type mismatch, 'PrismHologram.Hologram.InferenceProofs.matmulFlops_overflow' has type
     ∀ (_ __1 __2 : UInt64),
@@ -778,7 +795,8 @@ child_timeout_ms = 300000
         for name, declaration_index in (("bounded", 4), ("valid", 5), ("conversion-overflow", 6),
                                         ("multiply-bounded", 7), ("multiply-overflow", 8),
                                         ("step-bounded", 9), ("step-overflow", 10), ("matrix-bounded", 11),
-                                        ("matrix-overflow", 12), ("canonical-overflow", 13)):
+                                        ("matrix-overflow", 12), ("canonical-overflow", 13),
+                                        ("canonical-bounded", 14)):
             core = json.loads(core_line[len("\\coredata{"):-1])
             nodes = core["nodes"]
             declaration = core["declarations"][declaration_index]
@@ -834,10 +852,11 @@ child_timeout_ms = 300000
                           "false_accumulator_step_rejected": True,
                           "false_guarded_matrix_composition_rejected": True,
                           "false_canonical_matrix_overflow_rejected": True,
-                          "kernel_rejection_cases": 15,
+                          "false_canonical_matrix_bounded_rejected": True,
+                          "kernel_rejection_cases": 16,
                           "proof_inventory_mutations_rejected": inventory_mutations,
                           "verification": verification,
-                          "scope": "LexLean boundary equations; general zero-factor, prefix, checked-multiplication, accumulator-step, guarded-matrix composition and canonical matrix-overflow proofs",
+                          "scope": "LexLean boundary equations; general zero-factor, prefix, checked-multiplication, accumulator-step, guarded-matrix composition and full-domain canonical matrix bounded/overflow proofs",
                           "product_acceptance": "not-established"}
         if options.evidence_directory is not None:
             (options.evidence_directory / "false-equation-result.json").write_text(

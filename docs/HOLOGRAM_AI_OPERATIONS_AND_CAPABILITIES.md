@@ -64,9 +64,11 @@ used. The checked-conversion and multiplication proofs compose into
 The guarded overflow proof covers failure at any multiplication stage.
 `matmulFlops_overflow` additionally derives all nonzero dimensions and the
 actual zero guard from the final product bound, proving the canonical entry
-point returns the typed error. The canonical bounded-success composition and
-generated-runtime acceptance remain unestablished. The boundary corpus is
-supplementary finite evidence.
+point returns the typed error. `matmulFlops_bounded` proves the exact result
+under only the final product bound, handling every zero-factor case and deriving
+the intermediate bounds otherwise. Together these canonical theorems cover all
+UInt64 dimension triples. Generated-runtime acceptance remains unestablished;
+the boundary corpus is supplementary finite evidence.
 
 ### 2.2 Formal Prefix KV-Cache Elision
 The LexLean model returns `Result UInt64 KVPrefixError`: valid bounds return
