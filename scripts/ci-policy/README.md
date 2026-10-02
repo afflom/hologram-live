@@ -20,3 +20,16 @@ Offsets are since original run creation, including time before reruns, not
 runner queue time. Aggregates cover timed jobs only; unknown durations stay
 null. Summed wall time is not CPU usage, billing, or workflow elapsed time.
 Differences between runs do not establish optimization causality or acceptance.
+
+## Declared workflow inventory
+
+Run `node scripts/ci-policy/inventory.cjs REPOSITORY COMMIT_SHA` with an exact
+40-character commit. It reads tracked Git blobs, not working-tree changes,
+and records every workflow's digest, complete declarations and dependency layers.
+Conditions and matrices remain unevaluated; called actions and scripts remain
+references. Combine this source inventory with matching actual job timings and
+executed suite inventories. Neither declarations nor successful scheduling prove
+product coverage. No workflow or test is removed by this reporting tool.
+Inventories exceeding 128 workflows, 1 MiB per source or 8 MiB total source
+are refused, never truncated. Symlinks and shared/cyclic YAML collections are
+also refused. Git replacement refs cannot substitute the requested commit.
