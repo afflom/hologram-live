@@ -2,6 +2,7 @@
 /.lexlean/
 /.prism/
 /node_modules/
+/scripts/ci-policy/node_modules/
 /apps/docs/node_modules/
 /apps/docs/dist/
 /apps/docs/.astro/
