@@ -125,14 +125,15 @@ def is_false_equation_rejection(result, *, prefix=False):
     )
 
 
-def require_zero_proof_contract(core):
+def require_general_arithmetic_contract(core):
     """Check statements independently of proof bodies and DAG node numbering."""
     namespace = "PrismHologram.Hologram.Inference."
     prefix = "PrismHologram.Hologram.InferenceProofs.matmulFlops_zero_"
-    expected_names = {prefix + "inner", prefix + "columns"}
+    prefix_name = "PrismHologram.Hologram.InferenceProofs.kvEffectiveTokens_full_prefix"
+    expected_names = {prefix + "inner", prefix + "columns", prefix_name}
     declarations = core["declarations"]
-    if len(declarations) != 2 or {row["name"] for row in declarations} != expected_names:
-        raise RuntimeError("general zero-factor theorem inventory changed")
+    if len(declarations) != 3 or {row["name"] for row in declarations} != expected_names:
+        raise RuntimeError("general arithmetic theorem inventory changed")
     zero_level = {"k": "z"}
     one_level = {"k": "s", "a": zero_level}
     def constant(name, levels=()):
@@ -163,11 +164,19 @@ def require_zero_proof_contract(core):
                      apply(constant(namespace + "matmulFlops"), matrix), success)
         expected = {"k": "p", "n": "m", "b": "e", "t": uint, "v": {
             "k": "p", "n": "k" if columns else "n", "b": "e", "t": uint, "v": goal}}
+        if declaration["name"] == prefix_name:
+            prefix_error = constant(namespace + "KVPrefixError")
+            prefix_result = apply(constant("Except", (zero_level, zero_level)), prefix_error, uint)
+            prefix_success = apply(constant("Except.ok", (zero_level, zero_level)), prefix_error, uint, zero)
+            total = {"k": "b", "i": 0}
+            prefix_goal = apply(constant("Eq", (one_level,)), prefix_result,
+                                apply(constant(namespace + "kvEffectiveTokens"), total, total), prefix_success)
+            expected = {"k": "p", "n": "total", "b": "e", "t": uint, "v": prefix_goal}
         if (declaration["kind"] != "theorem" or declaration["levels"] != []
                 or declaration["policy"] != {"kind": "exact", "axioms": ["Quot.sound", "propext"]}
                 or declaration.get("generated", False) is not False
                 or expand(declaration["type"], [4096]) != expected):
-            raise RuntimeError("general zero-factor theorem statement or policy changed")
+            raise RuntimeError("general arithmetic theorem statement or policy changed")
 
 
 def require_zero_rows_contract(model):
@@ -200,6 +209,27 @@ def is_false_general_rejection(result):
     ∀ (_ __1 : UInt64),
       PrismHologram.Hologram.Inference.matmulFlops { m := _, k := UInt64.ofNat 0, n := __1 } =
         Except.ok (UInt64.ofNat 1)"""
+    return is_kernel_rejection(result, expected)
+
+
+def is_false_full_prefix_rejection(result):
+    expected = """Lean rejected `PrismHologram.Hologram.InferenceProofs` (error): native core declaration 'PrismHologram.Hologram.InferenceProofs.kvEffectiveTokens_full_prefix':
+  (kernel) declaration type mismatch, 'PrismHologram.Hologram.InferenceProofs.kvEffectiveTokens_full_prefix' has type
+    ∀ (_ : UInt64),
+      (fun __1 =>
+            Option.rec (Except.error (PrismHologram.Hologram.Inference.KVPrefixError.exceedsTotal _ _))
+              (fun _ => Except.ok _) (PrismHologram.Hologram.Inference.LexLeanRuntime.checkedFromInt __1))
+          ((Int.ofNat _.toNat).sub (Int.ofNat _.toNat)) =
+        (fun __1 =>
+            Option.rec (Except.error (PrismHologram.Hologram.Inference.KVPrefixError.exceedsTotal _ _))
+              (fun _ => Except.ok _) (PrismHologram.Hologram.Inference.LexLeanRuntime.checkedFromInt __1))
+          (Int.ofNat 0)
+  but it is expected to have type
+    ∀ (_ : UInt64), PrismHologram.Hologram.Inference.kvEffectiveTokens _ _ = Except.ok (UInt64.ofNat 1)"""
+    return is_kernel_rejection(result, expected)
+
+
+def is_kernel_rejection(result, expected):
     diagnostics = result.get("diagnostics", [])
     return (result.get("spec") == "lexlean/command-result/1" and result.get("command") == "verify"
             and result.get("success") is False and result.get("exit_code") == 1
@@ -250,19 +280,19 @@ def main():
     proof_text = proofs.decode("utf-8")
     core_line = next(line for line in proof_text.splitlines() if line.startswith("\\coredata{"))
     core = json.loads(core_line[len("\\coredata{"):-1])
-    require_zero_proof_contract(core)
-    for change in ("omitted", "weakened", "policy"):
+    require_general_arithmetic_contract(core)
+    for change in ("omitted-inner", "omitted-columns", "omitted-prefix", "weakened", "weakened-prefix", "policy"):
         changed = json.loads(json.dumps(core))
-        if change == "omitted":
-            changed["declarations"].pop()
-        elif change == "weakened":
+        if change.startswith("omitted-"):
+            changed["declarations"].pop({"omitted-inner": 0, "omitted-columns": 1, "omitted-prefix": 2}[change])
+        elif change.startswith("weakened"):
             # Remove a quantified argument from the actual source statement.
-            declaration = changed["declarations"][1]
+            declaration = changed["declarations"][2 if change == "weakened-prefix" else 1]
             declaration["type"] = changed["nodes"][declaration["type"]]["v"]
         else:
             changed["declarations"][1]["policy"] = {"kind": "allow", "axioms": ["Quot.sound", "propext"]}
         try:
-            require_zero_proof_contract(changed)
+            require_general_arithmetic_contract(changed)
         except RuntimeError:
             pass
         else:
@@ -399,6 +429,32 @@ child_timeout_ms = 300000
             unrelated["diagnostics"][0]["message"] = message
             if is_false_general_rejection(unrelated):
                 raise RuntimeError("unrelated kernel rejection accepted")
+        core = json.loads(core_line[len("\\coredata{"):-1])
+        nodes = core["nodes"]
+        declaration = core["declarations"][2]
+        binder = dict(nodes[declaration["type"]])
+        goal = dict(nodes[binder["v"]])
+        success = dict(nodes[goal["x"]])
+        zero_value = nodes[success["x"]]
+        one_value = append({"k": "a", "f": zero_value["f"], "x": append({"k": "n", "v": "1"})})
+        success["x"] = one_value
+        goal["x"] = append(success)
+        binder["v"] = append(goal)
+        declaration["type"] = append(binder)
+        mutated = "\\coredata{" + json.dumps(core, sort_keys=True, separators=(",", ":")) + "}"
+        (workspace / "src/Hologram/InferenceProofs.lex.tex").write_text(
+            proof_text.replace(core_line, mutated), encoding="utf-8")
+        prefix_proof_rejected = run("lexlean", arguments, workspace, check=False)
+        prefix_proof_rejection = json.loads(prefix_proof_rejected.stdout)
+        if prefix_proof_rejected.returncode != 1 or not is_false_full_prefix_rejection(prefix_proof_rejection):
+            print(prefix_proof_rejected.stdout, file=sys.stderr)
+            raise RuntimeError("kernel did not reject the false full-prefix theorem")
+        for message in ("(kernel) unrelated type error", prefix_proof_rejection["diagnostics"][0]["message"].replace(
+                "Except.ok (UInt64.ofNat 1)", "Except.ok (UInt64.ofNat 2)")):
+            unrelated = json.loads(json.dumps(prefix_proof_rejection))
+            unrelated["diagnostics"][0]["message"] = message
+            if is_false_full_prefix_rejection(unrelated):
+                raise RuntimeError("unrelated full-prefix kernel rejection accepted")
         report = {"schema": "hologram/inference-arithmetic-regression/1",
                           "source_sha256": hashlib.sha256(source).hexdigest(),
                           "proof_source_sha256": hashlib.sha256(proofs).hexdigest(),
@@ -408,9 +464,10 @@ child_timeout_ms = 300000
                           "false_equation_rejected": True,
                           "false_prefix_clamping_rejected": True,
                           "false_general_zero_theorem_rejected": True,
-                          "proof_inventory_mutations_rejected": 5,
+                          "false_general_full_prefix_rejected": True,
+                          "proof_inventory_mutations_rejected": 8,
                           "verification": verification,
-                          "scope": "LexLean matrix and prefix boundary equations; general zero-factor proofs",
+                          "scope": "LexLean matrix and prefix boundary equations; general zero-factor and full-prefix proofs",
                           "product_acceptance": "not-established"}
         if options.evidence_directory is not None:
             (options.evidence_directory / "false-equation-result.json").write_text(
@@ -419,6 +476,8 @@ child_timeout_ms = 300000
                 json.dumps(prefix_rejection, sort_keys=True) + "\n", encoding="utf-8")
             (options.evidence_directory / "false-general-proof-result.json").write_text(
                 json.dumps(proof_rejection, sort_keys=True) + "\n", encoding="utf-8")
+            (options.evidence_directory / "false-general-prefix-proof-result.json").write_text(
+                json.dumps(prefix_proof_rejection, sort_keys=True) + "\n", encoding="utf-8")
             (options.evidence_directory / "regression-result.json").write_text(
                 json.dumps(report, sort_keys=True) + "\n", encoding="utf-8")
         print(json.dumps(report, sort_keys=True))
