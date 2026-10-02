@@ -34,6 +34,20 @@ const policySteps = [
     } },
     { run: 'npm ci --ignore-scripts --no-audit --no-fund', 'working-directory': 'scripts/ci-policy' },
     { run: 'npm test', 'working-directory': 'scripts/ci-policy' },
+    {
+      name: 'Inventory exact workflow source (not product acceptance)',
+      run: 'node scripts/ci-policy/inventory.cjs "$GITHUB_WORKSPACE" "$GITHUB_SHA" > "$RUNNER_TEMP/ci-source-inventory.json"',
+    },
+    {
+      name: 'Retain declared workflow inventory',
+      uses: 'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02',
+      with: {
+        name: 'ci-source-inventory-${{ github.run_id }}-${{ github.run_attempt }}',
+        path: '${{ runner.temp }}/ci-source-inventory.json',
+        'if-no-files-found': 'error',
+        'retention-days': 7,
+      },
+    },
 ];
 
 function checkPolicy(workflow) {
@@ -98,6 +112,10 @@ const mutations = {
   'new skipped-check prerequisite': x => { x.jobs.rust.needs = 'policy'; },
   'policy failure ignored': x => { x.jobs.rust.steps[3]['continue-on-error'] = true; },
   'policy test removed': x => { x.jobs.rust.steps.splice(3, 1); },
+  'source inventory missing': x => { x.jobs.rust.steps.splice(4, 1); },
+  'inventory uses branch head instead of tested checkout': x => { x.jobs.rust.steps[4].run = x.jobs.rust.steps[4].run.replace('$GITHUB_SHA', 'main'); },
+  'missing artifact tolerated': x => { x.jobs.rust.steps[5].with['if-no-files-found'] = 'ignore'; },
+  'mutable artifact action': x => { x.jobs.rust.steps[5].uses = 'actions/upload-artifact@v4'; },
   'unlocked dependency installation': x => { x.jobs.rust.steps[2].run = 'npm install'; },
   'global error suppression': x => { x.defaults = { run: { shell: 'bash {0}' } }; },
 };

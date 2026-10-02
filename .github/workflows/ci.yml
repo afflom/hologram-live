@@ -30,6 +30,15 @@ jobs:
         working-directory: scripts/ci-policy
       - run: npm test
         working-directory: scripts/ci-policy
+      - name: Inventory exact workflow source (not product acceptance)
+        run: node scripts/ci-policy/inventory.cjs "$GITHUB_WORKSPACE" "$GITHUB_SHA" > "$RUNNER_TEMP/ci-source-inventory.json"
+      - name: Retain declared workflow inventory
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ci-source-inventory-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ci-source-inventory.json
+          if-no-files-found: error
+          retention-days: 7
 
       - uses: dtolnay/rust-toolchain@1.97.1
         with:

@@ -33,3 +33,9 @@ product coverage. No workflow or test is removed by this reporting tool.
 Inventories exceeding 128 workflows, 1 MiB per source or 8 MiB total source
 are refused, never truncated. Symlinks and shared/cyclic YAML collections are
 also refused. Git replacement refs cannot substitute the requested commit.
+
+The existing native CI job retains this report for seven days, before native
+tests execute. Its commit is the tested checkout (`GITHUB_SHA`, normally a merge
+commit for PR runs), not necessarily the API run's PR-head SHA. An uploaded
+inventory therefore does not mean subsequent tests passed. No extra job or
+acceptance cache is introduced.
