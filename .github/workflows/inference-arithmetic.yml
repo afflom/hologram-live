@@ -6,12 +6,16 @@ on:
     tags: ['**']
     paths:
       - src/Hologram/Inference.lex.tex
+      - src/Hologram/InferenceProofs.lex.tex
+      - src/Hologram.lex.tex
       - scripts/verify-inference-arithmetic.py
       - prismpm.lock
       - .github/workflows/inference-arithmetic.yml
   pull_request:
     paths:
       - src/Hologram/Inference.lex.tex
+      - src/Hologram/InferenceProofs.lex.tex
+      - src/Hologram.lex.tex
       - scripts/verify-inference-arithmetic.py
       - prismpm.lock
       - .github/workflows/inference-arithmetic.yml

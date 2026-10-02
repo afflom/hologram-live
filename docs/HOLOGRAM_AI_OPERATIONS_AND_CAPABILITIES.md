@@ -54,9 +54,12 @@ Matmul FLOP arithmetic is defined via checked arithmetic to prevent integer over
 $$\text{matmulFlops}(M, K, N) = 2 \times M \times K \times N$$
 The LexLean model returns `Result UInt64 MatrixCostError`: any zero factor
 returns success with zero; nonzero products exceeding `UInt64` return `overflow`.
-`matmulFlops_canonical` verifies one example; `matmulFlops_zero_rows` proves the
-zero-row case for arbitrary remaining dimensions. The kernel-checked boundary
-corpus is finite, not a general overflow theorem or generated-runtime acceptance.
+`matmulFlops_canonical` verifies one example. `matmulFlops_zero_rows`,
+`matmulFlops_zero_inner` and `matmulFlops_zero_columns` prove each zero-factor
+case for arbitrary remaining dimensions. The latter two are LexLean core-module
+proofs checked against the actual imported UInt64 model; no handwritten Lean is
+used. The boundary corpus remains finite, not a general overflow theorem or
+generated-runtime acceptance.
 
 ### 2.2 Formal Prefix KV-Cache Elision
 The LexLean model returns `Result UInt64 KVPrefixError`: valid bounds return

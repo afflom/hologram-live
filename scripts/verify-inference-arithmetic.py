@@ -139,6 +139,13 @@ def main():
         source = handle.read(4194305)
     if len(source) > 4194304:
         raise RuntimeError("matrix model exceeds the compiler source limit")
+    proof_path = ROOT / "src/Hologram/InferenceProofs.lex.tex"
+    if proof_path.is_symlink() or not proof_path.is_file():
+        raise RuntimeError("arithmetic proofs must be a regular source file")
+    with proof_path.open("rb") as handle:
+        proofs = handle.read(4194305)
+    if len(proofs) > 4194304:
+        raise RuntimeError("arithmetic proofs exceed the compiler source limit")
     values = (0, 1, 2, (1 << 32) - 1, 1 << 32, 1 << 63, UINT64_MAX)
     cases = list(itertools.product(values, repeat=3))
     cases.extend(((1, 1, UINT64_MAX // 2), (1, 1, UINT64_MAX // 2 + 1), (1 << 63, 0, 10)))
@@ -152,8 +159,10 @@ def main():
         workspace = Path(owned)
         (workspace / "src/Hologram").mkdir(parents=True)
         (workspace / "src/Hologram/Inference.lex.tex").write_bytes(source)
+        (workspace / "src/Hologram/InferenceProofs.lex.tex").write_bytes(proofs)
         header = ("\\begin{lexlean}{Checks}\n\\useglossary{lexlean.std.bool@1.1.0}\n"
             "\\useglossary{lexlean.std.nat@1.1.0}\n\\importmodule{Hologram.Inference}\n"
+            "\\importmodule{Hologram.InferenceProofs}\n"
             "\\title{Boolean}\n\\begin{semanticmodule}\n\\semanticdata{")
         footer = "}\n\\end{semanticmodule}\n\\end{lexlean}\n"
         checks = workspace / "src/Checks.lex.tex"
@@ -163,7 +172,7 @@ name = "hologram-inference-arithmetic"
 language = "1.1"
 module_prefix = "PrismHologram"
 source_roots = ["src"]
-entrypoints = ["src/Checks.lex.tex"]
+entrypoints = ["src/Checks.lex.tex", "src/Hologram/InferenceProofs.lex.tex"]
 build_root = ".lexlean"
 lockfile = "lexlean.lock"
 lean_workspace = "."
@@ -198,7 +207,7 @@ child_timeout_ms = 300000
         verification = json.loads(run("lexlean", arguments, workspace).stdout)
         assert verification["spec"] == "lexlean/command-result/1"
         assert verification["success"] is True and verification["exit_code"] == 0
-        assert verification["modules"] == ["Checks", "Hologram.Inference"]
+        assert verification["modules"] == ["Checks", "Hologram.Inference", "Hologram.InferenceProofs"]
         if options.evidence_directory is not None:
             shutil.copytree(workspace, options.evidence_directory)
         # The same compiler/kernel path must reject a deliberately false
@@ -234,21 +243,61 @@ child_timeout_ms = 300000
         if prefix_rejected.returncode != 1 or not is_false_equation_rejection(prefix_rejection, prefix=True):
             print(prefix_rejected.stdout, file=sys.stderr)
             raise RuntimeError("compiler did not reject the false prefix-clamping equation")
+        # Change only a general theorem's conclusion (zero -> one), keeping
+        # its actual model, input dimensions and kernel proof unchanged.
+        checks.write_text(header + payload + footer, encoding="utf-8")
+        proof_text = proofs.decode("utf-8")
+        core_line = next(line for line in proof_text.splitlines() if line.startswith("\\coredata{"))
+        core = json.loads(core_line[len("\\coredata{"):-1])
+        nodes = core["nodes"]
+        def append(node):
+            nodes.append(node)
+            return len(nodes) - 1
+        def wrong_conclusion(index):
+            node = nodes[index]
+            if node["k"] == "p":
+                return append({**node, "v": wrong_conclusion(node["v"])})
+            assert node["k"] == "a"
+            result = nodes[node["x"]]
+            zero = nodes[result["x"]]
+            assert nodes[zero["x"]] == {"k": "n", "v": "0"}
+            one = append({"k": "a", "f": zero["f"], "x": append({"k": "n", "v": "1"})})
+            wrong_result = append({"k": "a", "f": result["f"], "x": one})
+            return append({**node, "x": wrong_result})
+        declaration = core["declarations"][0]
+        declaration["type"] = wrong_conclusion(declaration["type"])
+        mutated = "\\coredata{" + json.dumps(core, sort_keys=True, separators=(",", ":")) + "}"
+        (workspace / "src/Hologram/InferenceProofs.lex.tex").write_text(
+            proof_text.replace(core_line, mutated), encoding="utf-8")
+        proof_rejected = run("lexlean", arguments, workspace, check=False)
+        proof_rejection = json.loads(proof_rejected.stdout)
+        diagnostic, = proof_rejection["diagnostics"]
+        if (proof_rejected.returncode != 1 or proof_rejection["success"] is not False
+                or diagnostic["code"] != "LLV7002"
+                or diagnostic["primary"]["path"] != "src/Hologram/InferenceProofs.lex.tex"
+                or f"native core declaration '{declaration['name']}'" not in diagnostic["message"]
+                or "(kernel)" not in diagnostic["message"]):
+            print(proof_rejected.stdout, file=sys.stderr)
+            raise RuntimeError("kernel did not reject the intended false general theorem")
         report = {"schema": "hologram/inference-arithmetic-regression/1",
                           "source_sha256": hashlib.sha256(source).hexdigest(),
+                          "proof_source_sha256": hashlib.sha256(proofs).hexdigest(),
                           "expected_cases": len(cases), "verified_cases": len(cases),
                           "expected_prefix_cases": len(prefix_cases),
                           "verified_prefix_cases": len(prefix_cases),
                           "false_equation_rejected": True,
                           "false_prefix_clamping_rejected": True,
+                          "false_general_zero_theorem_rejected": True,
                           "verification": verification,
-                          "scope": "LexLean matrix and prefix boundary equations",
+                          "scope": "LexLean matrix and prefix boundary equations; general zero-factor proofs",
                           "product_acceptance": "not-established"}
         if options.evidence_directory is not None:
             (options.evidence_directory / "false-equation-result.json").write_text(
                 json.dumps(rejection, sort_keys=True) + "\n", encoding="utf-8")
             (options.evidence_directory / "false-prefix-result.json").write_text(
                 json.dumps(prefix_rejection, sort_keys=True) + "\n", encoding="utf-8")
+            (options.evidence_directory / "false-general-proof-result.json").write_text(
+                json.dumps(proof_rejection, sort_keys=True) + "\n", encoding="utf-8")
             (options.evidence_directory / "regression-result.json").write_text(
                 json.dumps(report, sort_keys=True) + "\n", encoding="utf-8")
         print(json.dumps(report, sort_keys=True))
